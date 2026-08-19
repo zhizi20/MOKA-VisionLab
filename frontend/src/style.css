@@ -1,0 +1,12 @@
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; height: 100%; }
+body {
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f4f7fb;
+  color: #1f2d3d;
+}
+.page-card { margin-bottom: 16px; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.hint { color: #909399; font-size: 12px; margin-top: 4px; }
+.fade-enter-active, .fade-leave-active { transition: opacity 0.12s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
