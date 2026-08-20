@@ -2,9 +2,9 @@
   <div class="login">
     <el-card class="box" shadow="always">
       <div class="brand">
-        <div class="badge">DL</div>
+        <div class="badge">MV</div>
         <div>
-          <h2>AI-DetectLab</h2>
+          <h2>MOKA-VisionLab</h2>
           <p>视觉检测实验室</p>
         </div>
       </div>

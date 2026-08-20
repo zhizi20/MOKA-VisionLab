@@ -7,8 +7,11 @@
             <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="置信度">
-          <el-slider v-model="conf" :min="0.05" :max="0.95" :step="0.05" style="width: 160px" />
+        <el-form-item :label="`置信度 ${conf}`">
+          <el-slider v-model="conf" :min="0.05" :max="0.95" :step="0.05" style="width: 140px" />
+        </el-form-item>
+        <el-form-item :label="`IoU ${iou}`">
+          <el-slider v-model="iou" :min="0.1" :max="0.95" :step="0.05" style="width: 140px" />
         </el-form-item>
         <el-form-item>
           <el-upload :show-file-list="false" :auto-upload="false" accept="video/*" :on-change="onPick">
@@ -40,6 +43,7 @@ import { detectApi, modelApi } from '../api'
 const models = ref([])
 const modelId = ref(null)
 const conf = ref(0.25)
+const iou = ref(0.7)
 const file = ref(null)
 const starting = ref(false)
 const jobId = ref('')
@@ -70,6 +74,7 @@ async function run() {
     const fd = new FormData()
     fd.append('file', file.value)
     fd.append('conf', String(conf.value))
+    fd.append('iou', String(iou.value))
     const res = await detectApi.video(modelId.value, fd)
     jobId.value = res.data.jobId
     poll()

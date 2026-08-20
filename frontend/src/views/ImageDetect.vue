@@ -7,8 +7,11 @@
             <el-option v-for="m in models" :key="m.id" :label="`${m.name}（${m.source}）`" :value="m.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="置信度">
-          <el-slider v-model="conf" :min="0.05" :max="0.95" :step="0.05" style="width: 160px" />
+        <el-form-item :label="`置信度 ${conf}`">
+          <el-slider v-model="conf" :min="0.05" :max="0.95" :step="0.05" style="width: 140px" />
+        </el-form-item>
+        <el-form-item :label="`IoU ${iou}`">
+          <el-slider v-model="iou" :min="0.1" :max="0.95" :step="0.05" style="width: 140px" />
         </el-form-item>
         <el-form-item>
           <el-upload :show-file-list="false" :auto-upload="false" accept="image/*" :on-change="onPick">
@@ -28,7 +31,12 @@
       <el-col :span="10">
         <el-card :header="`检出 ${result.count} 个目标`">
           <el-table :data="result.boxes" size="small" border>
-            <el-table-column prop="cls" label="类别" />
+            <el-table-column label="类别">
+              <template #default="{ row }">
+                <span class="dot" :style="{ background: row.color || '#00e5ff' }" />
+                {{ row.cls }}
+              </template>
+            </el-table-column>
             <el-table-column prop="conf" label="置信度" width="90" />
           </el-table>
         </el-card>
@@ -44,6 +52,7 @@ import { detectApi, modelApi } from '../api'
 const models = ref([])
 const modelId = ref(null)
 const conf = ref(0.25)
+const iou = ref(0.7)
 const file = ref(null)
 const loading = ref(false)
 const result = ref(null)
@@ -65,6 +74,7 @@ async function run() {
     const fd = new FormData()
     fd.append('file', file.value)
     fd.append('conf', String(conf.value))
+    fd.append('iou', String(iou.value))
     const res = await detectApi.image(modelId.value, fd)
     result.value = res.data
   } finally {
@@ -75,4 +85,5 @@ async function run() {
 
 <style scoped>
 .preview { width: 100%; display: block; border-radius: 6px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 </style>

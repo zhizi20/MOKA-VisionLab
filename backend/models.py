@@ -53,6 +53,7 @@ class Dataset(db.Model):
     val_count = db.Column(db.Integer, default=0)
     split_ratio = db.Column(db.Float, default=0.8)
     description = db.Column(db.Text, default="")
+    folder = db.Column(db.String(160), default="")
     create_time = db.Column(db.DateTime, default=_now)
 
 
@@ -74,4 +75,5 @@ class TrainJob(db.Model):
     log_tail = db.Column(db.Text, default="")
     error = db.Column(db.Text, default="")
     result_model_id = db.Column(db.Integer)
+    folder = db.Column(db.String(160), default="")
     create_time = db.Column(db.DateTime, default=_now)

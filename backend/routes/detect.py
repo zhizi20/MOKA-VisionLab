@@ -4,6 +4,7 @@ from pathlib import Path
 
 from flask import Blueprint, request, send_file
 
+from class_colors import load_global_colors
 from config import Config
 from extensions import db
 from infer import detect_image, detect_video, video_jobs, video_jobs_lock
@@ -37,8 +38,10 @@ def detect_image_api(mid: int):
     if f is None or not f.filename:
         return fail("请选择图片")
     conf = float(request.form.get("conf") or 0.25)
+    iou = float(request.form.get("iou") or 0.7)
+    color_map = load_global_colors(Config.UPLOAD_FOLDER)
     try:
-        result = detect_image(weight, f.read(), conf=conf)
+        result = detect_image(weight, f.read(), conf=conf, iou=iou, color_map=color_map)
     except Exception as exc:  # noqa: BLE001
         return fail(f"推理失败：{exc}", 500)
     return ok(result, "检测完成")
@@ -57,6 +60,8 @@ def detect_video_api(mid: int):
     if ext not in Config.VIDEO_ALLOWED_EXT:
         return fail("不支持的视频格式")
     conf = float(request.form.get("conf") or 0.25)
+    iou = float(request.form.get("iou") or 0.7)
+    color_map = load_global_colors(Config.UPLOAD_FOLDER)
     job_id = uuid.uuid4().hex
     src = Config.VIDEO_FOLDER / f"{job_id}{ext}"
     dst = Config.OUTPUT_FOLDER / f"{job_id}_det.mp4"
@@ -65,7 +70,7 @@ def detect_video_api(mid: int):
     f.save(src)
     threading.Thread(
         target=detect_video,
-        args=(job_id, weight, str(src), str(dst), conf),
+        args=(job_id, weight, str(src), str(dst), conf, iou, color_map),
         daemon=True,
     ).start()
     return ok({"jobId": job_id}, "任务已启动")

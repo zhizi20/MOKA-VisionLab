@@ -1,23 +1,50 @@
+import os
 import random
 import shutil
+import threading
+import uuid
 from pathlib import Path
 
 import cv2
-from flask import Blueprint, request, send_file
+from flask import Blueprint, current_app, request, send_file
 
+from class_colors import (
+    load_dataset_colors,
+    load_global_colors,
+    palette_for,
+    save_dataset_colors,
+    update_global_colors,
+)
 from config import Config
 from extensions import db
 from models import Dataset, DetectModel
+from ndjson_import import (
+    SOURCE_FILE,
+    bind_dataset_job,
+    class_name_list,
+    dedupe_images,
+    find_source_ndjson,
+    import_jobs,
+    import_jobs_lock,
+    latest_dataset_jobs,
+    list_missing,
+    missing_failures,
+    parse_ndjson,
+    run_ndjson_import,
+    set_paused,
+    snapshot_job,
+)
 from routes.models import resolve_weight
 from security import login_required
 from smart_label import sam_click_box, yolo_prelabel
+from storage import assign_dataset_folder, dataset_dir
 from utils import fail, ok
 
 datasets_bp = Blueprint("datasets", __name__, url_prefix="/api/datasets")
 
 
 def _ds_dir(ds: Dataset) -> Path:
-    return Config.DATASET_FOLDER / str(ds.id)
+    return dataset_dir(ds)
 
 
 def _raw_images(ds: Dataset) -> Path:
@@ -36,16 +63,64 @@ def _classes(ds: Dataset) -> list[str]:
     return [c.strip() for c in (ds.class_names or "").split(",") if c.strip()]
 
 
+def _image_stats(ds: Dataset) -> tuple[int, int]:
+    img_dir = _ds_dir(ds) / "raw" / "images"
+    lbl_dir = _ds_dir(ds) / "raw" / "labels"
+    if not img_dir.exists():
+        return 0, 0
+    n = 0
+    labeled = 0
+    for p in img_dir.iterdir():
+        if p.suffix.lower() not in Config.IMAGE_ALLOWED_EXT:
+            continue
+        n += 1
+        lbl = lbl_dir / f"{p.stem}.txt"
+        if lbl.exists() and lbl.read_text(encoding="utf-8").strip():
+            labeled += 1
+    return n, labeled
+
+
+def _label_class_ids(path: Path) -> list[int]:
+    ids: set[int] = set()
+    if not path.exists():
+        return []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            ids.add(int(float(parts[0])))
+        except ValueError:
+            continue
+    return sorted(ids)
+
+
 def _to_dict(ds: Dataset) -> dict:
+    ds_dir = _ds_dir(ds)
+    has_import = (ds_dir / SOURCE_FILE).is_file()
+    failed = missing_failures(ds_dir) if has_import else []
+    names = _classes(ds)
+    image_count, labeled_count = _image_stats(ds)
+    colors = load_dataset_colors(ds_dir, names) if names else []
     return {
         "id": ds.id,
         "name": ds.name,
-        "classNames": _classes(ds),
+        "classNames": names,
+        "colors": colors,
         "status": ds.status,
+        "imageCount": image_count,
+        "labeledCount": labeled_count,
         "trainCount": ds.train_count,
         "valCount": ds.val_count,
+        "built": ds.status == "ready",
         "splitRatio": ds.split_ratio,
         "description": ds.description,
+        "folder": ds.folder or "",
+        "hasImport": has_import,
+        "failedCount": len(failed),
+        "failures": failed[:50],
+        "folderPath": str(_raw_images(ds)),
+        "importJob": snapshot_job(ds.id),
         "createTime": ds.create_time.strftime("%Y-%m-%d %H:%M:%S") if ds.create_time else "",
     }
 
@@ -76,10 +151,24 @@ def _read_boxes(path: Path) -> list[dict]:
 
 
 def _write_boxes(path: Path, boxes: list[dict]):
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     for b in boxes:
         lines.append(f"{int(b['cls'])} {b['cx']:.6f} {b['cy']:.6f} {b['w']:.6f} {b['h']:.6f}")
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def _sync_yolo_labels(ds: Dataset, stem: str, boxes: list[dict]):
+    """标注改的是 raw；若 yolo 划分里已有同名图，同步过去，避免看起来没保存。"""
+    yolo = _ds_dir(ds) / "yolo"
+    for split in ("train", "val", "test"):
+        img_dir = yolo / "images" / split
+        if not img_dir.exists():
+            continue
+        has_img = any(img_dir.glob(f"{stem}.*"))
+        lbl = yolo / "labels" / split / f"{stem}.txt"
+        if has_img or lbl.exists():
+            _write_boxes(lbl, boxes)
 
 
 @datasets_bp.get("")
@@ -87,6 +176,272 @@ def _write_boxes(path: Path, boxes: list[dict]):
 def list_datasets():
     rows = [_to_dict(d) for d in Dataset.query.order_by(Dataset.id.desc()).all()]
     return ok({"rows": rows, "total": len(rows)})
+
+
+@datasets_bp.post("/import-ndjson")
+@login_required
+def import_ndjson():
+    """导入 Ultralytics Platform 导出的 .ndjson，后台按 URL 下载图片与标注。"""
+    f = request.files.get("file")
+    local_path = (request.form.get("localPath") or "").strip()
+    src = None
+    tmp = None
+    if f and f.filename:
+        if not f.filename.lower().endswith(".ndjson"):
+            return fail("请选择 .ndjson 文件")
+        Config.TMP_FOLDER.mkdir(parents=True, exist_ok=True)
+        tmp = Config.TMP_FOLDER / f"_tmp_{uuid.uuid4().hex}.ndjson"
+        f.save(tmp)
+        src = tmp
+    elif local_path:
+        src = Path(local_path)
+        if not src.is_file():
+            return fail("本机路径不存在")
+    else:
+        return fail("请上传 .ndjson 或填写本机路径")
+    try:
+        meta, images = parse_ndjson(src)
+    except Exception as exc:  # noqa: BLE001
+        if tmp:
+            tmp.unlink(missing_ok=True)
+        return fail(f"解析 NDJSON 失败：{exc}")
+    images = dedupe_images(images)
+    if not images:
+        if tmp:
+            tmp.unlink(missing_ok=True)
+        return fail("NDJSON 中没有图片记录")
+    names = class_name_list(meta)
+    if not names:
+        if tmp:
+            tmp.unlink(missing_ok=True)
+        return fail("NDJSON 中没有类别")
+    ds = Dataset(
+        name=(meta.get("name") or src.stem).strip(),
+        class_names=",".join(names),
+        description=meta.get("description") or "从 Ultralytics NDJSON 导入",
+        status="importing",
+        split_ratio=0.8,
+    )
+    db.session.add(ds)
+    db.session.commit()
+    assign_dataset_folder(ds)
+    db.session.commit()
+    ds_dir = _ds_dir(ds)
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    stored = ds_dir / SOURCE_FILE
+    if src.resolve() != stored.resolve():
+        shutil.copy2(src, stored)
+    if tmp:
+        tmp.unlink(missing_ok=True)
+    save_dataset_colors(ds_dir, palette_for(names))
+    update_global_colors(Config.UPLOAD_FOLDER, names, palette_for(names))
+    job_id = uuid.uuid4().hex
+    with import_jobs_lock:
+        import_jobs[job_id] = {
+            "status": "running",
+            "datasetId": ds.id,
+            "paused": False,
+            "total": len(images),
+            "processed": 0,
+            "failed": 0,
+            "progress": 0,
+            "failures": [],
+            "error": None,
+        }
+    bind_dataset_job(ds.id, job_id)
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_import,
+        args=(app, job_id, ds.id, names, images),
+        daemon=True,
+    ).start()
+    return ok({"jobId": job_id, "datasetId": ds.id, "total": len(images)}, "已开始下载图片")
+
+
+@datasets_bp.get("/import-progress/<job_id>")
+@login_required
+def import_progress(job_id: str):
+    with import_jobs_lock:
+        job = import_jobs.get(job_id)
+    if job is None:
+        return fail("导入任务不存在", 404)
+    return ok(job)
+
+
+@datasets_bp.post("/<int:did>/import-pause")
+@login_required
+def pause_import(did: int):
+    job = snapshot_job(did)
+    if job is None:
+        return fail("该数据集当前没有进行中的下载任务")
+    if not set_paused(job["jobId"], True):
+        return fail("无法暂停")
+    return ok(snapshot_job(did), "已暂停下载")
+
+
+@datasets_bp.post("/<int:did>/import-resume")
+@login_required
+def resume_import(did: int):
+    jid = latest_dataset_jobs.get(did)
+    if not jid:
+        return fail("该数据集当前没有可继续的下载任务")
+    if not set_paused(jid, False):
+        return fail("无法继续")
+    return ok(snapshot_job(did), "已继续下载")
+
+
+@datasets_bp.get("/class-colors")
+@login_required
+def global_class_colors():
+    return ok(load_global_colors(Config.UPLOAD_FOLDER))
+
+
+@datasets_bp.get("/<int:did>/colors")
+@login_required
+def get_colors(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    names = _classes(ds)
+    colors = load_dataset_colors(_ds_dir(ds), names)
+    return ok({"classNames": names, "colors": colors})
+
+
+@datasets_bp.put("/<int:did>/colors")
+@login_required
+def put_colors(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    names = _classes(ds)
+    data = request.get_json(silent=True) or {}
+    colors = palette_for(names, data.get("colors") or [])
+    save_dataset_colors(_ds_dir(ds), colors)
+    update_global_colors(Config.UPLOAD_FOLDER, names, colors)
+    return ok({"classNames": names, "colors": colors}, "已保存颜色")
+
+
+@datasets_bp.post("/<int:did>/open-folder")
+@login_required
+def open_folder(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    path = _raw_images(ds)
+    try:
+        if os.name == "nt":
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(path)])  # noqa: S603
+    except OSError as exc:
+        return fail(f"无法打开目录：{exc}")
+    return ok({"path": str(path)}, "已打开资源管理器")
+
+
+def _apply_import_stats(ds: Dataset, stats: dict):
+    ds.train_count = stats["train"]
+    ds.val_count = stats["val"]
+    if stats.get("complete") and stats["train"] and stats["val"]:
+        ds.status = "ready"
+    elif stats.get("failed"):
+        ds.status = "incomplete"
+    elif stats["train"] and stats["val"]:
+        ds.status = "ready"
+    else:
+        ds.status = "raw"
+
+
+def _run_import(app, job_id: str, ds_id: int, names: list[str], images: list[dict]):
+    with app.app_context():
+        try:
+            ds = db.session.get(Dataset, ds_id)
+            stats = run_ndjson_import(job_id, _ds_dir(ds), names, images)
+            ds = db.session.get(Dataset, ds_id)
+            _apply_import_stats(ds, stats)
+            db.session.commit()
+            with import_jobs_lock:
+                job = import_jobs.get(job_id)
+                if job:
+                    job["status"] = "done"
+                    job["ready"] = stats["ready"]
+                    job["complete"] = stats["complete"]
+                    job["trainCount"] = stats["train"]
+                    job["valCount"] = stats["val"]
+                    job["failed"] = stats["failed"]
+                    job["failures"] = stats.get("failures") or []
+                    job["processed"] = stats.get("ok") or 0
+        except Exception as exc:  # noqa: BLE001
+            ds = db.session.get(Dataset, ds_id)
+            if ds:
+                ds.status = "raw"
+                db.session.commit()
+            with import_jobs_lock:
+                job = import_jobs.get(job_id)
+                if job:
+                    job.update(status="failed", error=str(exc))
+
+
+@datasets_bp.post("/<int:did>/retry-import")
+@login_required
+def retry_import(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    ds_dir = _ds_dir(ds)
+    upload = request.files.get("file")
+    stored = ds_dir / SOURCE_FILE
+    if upload and upload.filename:
+        if not str(upload.filename).lower().endswith(".ndjson"):
+            return fail("请选择该数据集对应的 .ndjson 文件")
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        upload.save(stored)
+    src = find_source_ndjson(ds_dir)
+    if src is None or not src.is_file():
+        return fail("该数据集没有绑定的 NDJSON，无法重试。请对该数据集重新导入，不要用其它数据集的索引。")
+    try:
+        meta, images = parse_ndjson(src)
+    except Exception as exc:  # noqa: BLE001
+        return fail(f"解析 NDJSON 失败：{exc}")
+    meta_name = (meta.get("name") or "").strip()
+    if meta_name and meta_name.lower() != (ds.name or "").strip().lower():
+        return fail(
+            f"该数据集绑定的 NDJSON 属于「{meta_name}」，与当前数据集「{ds.name}」不一致。"
+            "请删除该数据集后重新导入，不要重试。"
+        )
+    images = dedupe_images(images)
+    names = _classes(ds) or class_name_list(meta)
+    missing = list_missing(ds_dir, images)
+    if not missing:
+        ds.status = "ready" if (ds.train_count and ds.val_count) else ds.status
+        db.session.commit()
+        return ok({"missing": 0}, "没有缺失图片")
+    ds.status = "importing"
+    db.session.commit()
+    job_id = uuid.uuid4().hex
+    with import_jobs_lock:
+        import_jobs[job_id] = {
+            "status": "running",
+            "datasetId": ds.id,
+            "paused": False,
+            "total": len(images),
+            "processed": len(images) - len(missing),
+            "failed": 0,
+            "progress": 0,
+            "failures": [],
+            "error": None,
+        }
+    bind_dataset_job(ds.id, job_id)
+    app = current_app._get_current_object()
+    threading.Thread(
+        target=_run_import,
+        args=(app, job_id, ds.id, names, images),
+        daemon=True,
+    ).start()
+    return ok(
+        {"jobId": job_id, "datasetId": ds.id, "missing": len(missing), "total": len(images)},
+        f"开始补下 {len(missing)} 张失败图片",
+    )
 
 
 @datasets_bp.post("")
@@ -107,6 +462,11 @@ def add_dataset():
     )
     db.session.add(ds)
     db.session.commit()
+    assign_dataset_folder(ds)
+    db.session.commit()
+    names = _classes(ds)
+    save_dataset_colors(_ds_dir(ds), palette_for(names))
+    update_global_colors(Config.UPLOAD_FOLDER, names, palette_for(names))
     _raw_images(ds)
     _raw_labels(ds)
     return ok(_to_dict(ds), "已创建")
@@ -119,13 +479,20 @@ def update_dataset(did: int):
     if ds is None:
         return fail("数据集不存在", 404)
     data = request.get_json(silent=True) or {}
+    old_name = ds.name
     ds.name = (data.get("name") or ds.name).strip()
     if "classNames" in data:
         ds.class_names = ",".join(str(c).strip() for c in (data.get("classNames") or []) if str(c).strip())
+        names = _classes(ds)
+        colors = load_dataset_colors(_ds_dir(ds), names)
+        save_dataset_colors(_ds_dir(ds), colors)
+        update_global_colors(Config.UPLOAD_FOLDER, names, colors)
     if "splitRatio" in data:
         ds.split_ratio = float(data.get("splitRatio") or ds.split_ratio)
     if "description" in data:
         ds.description = data.get("description") or ""
+    if ds.name != old_name:
+        assign_dataset_folder(ds, rename=True)
     db.session.commit()
     return ok(_to_dict(ds))
 
@@ -214,14 +581,32 @@ def list_samples(did: int):
         if p.suffix.lower() not in Config.IMAGE_ALLOWED_EXT:
             continue
         lbl = lbl_dir / f"{p.stem}.txt"
-        boxes = 0
+        lines = []
         if lbl.exists():
-            boxes = sum(1 for line in lbl.read_text(encoding="utf-8").splitlines() if line.strip())
-        items.append({"stem": p.stem, "name": p.name, "annotated": boxes > 0, "boxCount": boxes})
+            lines = [line for line in lbl.read_text(encoding="utf-8").splitlines() if line.strip()]
+        class_ids = []
+        for line in lines:
+            parts = line.split()
+            if not parts:
+                continue
+            try:
+                class_ids.append(int(float(parts[0])))
+            except ValueError:
+                continue
+        items.append({
+            "stem": p.stem,
+            "name": p.name,
+            "annotated": bool(lines),
+            "boxCount": len(lines),
+            "classIds": sorted(set(class_ids)),
+        })
     annotated = sum(1 for i in items if i["annotated"])
+    names = _classes(ds)
     return ok({
         "samples": items,
-        "classNames": _classes(ds),
+        "classNames": names,
+        "colors": load_dataset_colors(_ds_dir(ds), names),
+        "folderPath": str(img_dir),
         "stats": {"total": len(items), "annotated": annotated, "unannotated": len(items) - annotated},
     })
 
@@ -236,6 +621,34 @@ def get_image(did: int, stem: str):
     if p is None:
         return fail("图片不存在", 404)
     return send_file(p)
+
+
+@datasets_bp.get("/<int:did>/boxes")
+@login_required
+def get_boxes(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    stem = (request.args.get("stem") or "").strip()
+    if not stem:
+        return fail("缺少图片名")
+    return ok({"boxes": _read_boxes(_raw_labels(ds) / f"{stem}.txt"), "stem": stem})
+
+
+@datasets_bp.put("/<int:did>/boxes")
+@login_required
+def put_boxes(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    data = request.get_json(silent=True) or {}
+    stem = (data.get("stem") or "").strip()
+    if not stem:
+        return fail("缺少图片名")
+    boxes = data.get("boxes") or []
+    _write_boxes(_raw_labels(ds) / f"{stem}.txt", boxes)
+    _sync_yolo_labels(ds, stem, boxes)
+    return ok({"stem": stem, "boxCount": len(boxes)}, "已保存")
 
 
 @datasets_bp.get("/<int:did>/labels/<stem>")
@@ -254,8 +667,10 @@ def put_labels(did: int, stem: str):
     if ds is None:
         return fail("数据集不存在", 404)
     data = request.get_json(silent=True) or {}
-    _write_boxes(_raw_labels(ds) / f"{stem}.txt", data.get("boxes") or [])
-    return ok(message="已保存")
+    boxes = data.get("boxes") or []
+    _write_boxes(_raw_labels(ds) / f"{stem}.txt", boxes)
+    _sync_yolo_labels(ds, stem, boxes)
+    return ok({"stem": stem, "boxCount": len(boxes)}, "已保存")
 
 
 @datasets_bp.post("/<int:did>/annotate/prelabel")

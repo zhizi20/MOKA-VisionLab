@@ -1,9 +1,9 @@
 <template>
   <el-container class="layout">
-    <el-aside :width="collapse ? '64px' : '220px'" class="aside">
+    <el-aside :width="collapse ? '64px' : '248px'" class="aside">
       <div class="logo">
-        <div class="logo-badge">DL</div>
-        <span v-show="!collapse" class="logo-text">AI-DetectLab</span>
+        <div class="logo-badge">MV</div>
+        <span v-show="!collapse" class="logo-text">MOKA-VisionLab</span>
       </div>
       <el-menu
         :default-active="route.path"
@@ -136,8 +136,8 @@ async function onCommand(cmd) {
 .logo-text {
   color: #eaf2ff;
   font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.4px;
+  font-size: 14px;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .side-menu { border-right: none; flex: 1; overflow-y: auto; overflow-x: hidden; }

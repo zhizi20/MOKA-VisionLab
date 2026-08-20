@@ -2,31 +2,92 @@
   <div>
     <div class="toolbar">
       <el-button type="primary" @click="open()">新建数据集</el-button>
+      <el-upload :show-file-list="false" :auto-upload="false" accept=".ndjson" :on-change="onNdjson">
+        <el-button type="success" plain :loading="importing">导入 Ultralytics NDJSON</el-button>
+      </el-upload>
       <el-button @click="load">刷新</el-button>
     </div>
+    <el-alert
+      v-if="importHint"
+      class="page-card"
+      :type="importStatus === 'failed' || importFailures.length ? 'warning' : 'info'"
+      :closable="false"
+      :title="importHint"
+    />
+    <el-progress
+      v-if="importJobId"
+      class="page-card"
+      :percentage="importPct"
+      :status="importStatus === 'failed' ? 'exception' : (importStatus === 'done' && !importFailures.length) ? 'success' : undefined"
+    />
+    <el-table v-if="importFailures.length" :data="importFailures" size="small" border class="page-card" max-height="240">
+      <el-table-column prop="file" label="失败图片" min-width="220" />
+      <el-table-column prop="split" label="划分" width="80" />
+      <el-table-column prop="error" label="原因" min-width="220" />
+    </el-table>
     <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="name" label="名称" min-width="140" />
-      <el-table-column label="类别" min-width="180">
+      <el-table-column prop="name" label="名称" min-width="120" />
+      <el-table-column label="类别" min-width="160">
         <template #default="{ row }">
-          <el-tag v-for="c in row.classNames" :key="c" size="small" style="margin:2px">{{ c }}</el-tag>
+          <el-tag
+            v-for="(c, i) in row.classNames"
+            :key="c"
+            size="small"
+            style="margin:2px"
+            :style="{ borderColor: row.colors?.[i], color: row.colors?.[i] }"
+          >{{ c }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="train / val" width="120">
-        <template #default="{ row }">{{ row.trainCount }} / {{ row.valCount }}</template>
+      <el-table-column label="图片" width="90">
+        <template #default="{ row }">{{ row.imageCount || 0 }}</template>
       </el-table-column>
-      <el-table-column prop="status" label="状态" width="90" />
-      <el-table-column label="操作" width="460" fixed="right">
+      <el-table-column label="已标注" width="110">
+        <template #default="{ row }">{{ row.labeledCount || 0 }} / {{ row.imageCount || 0 }}</template>
+      </el-table-column>
+      <el-table-column label="训练划分" width="120">
         <template #default="{ row }">
-          <el-upload :show-file-list="false" :auto-upload="false" multiple accept="image/*" :on-change="(f) => upload(row, f)">
-            <el-button size="small">上传图片</el-button>
-          </el-upload>
-          <el-upload :show-file-list="false" :auto-upload="false" accept="video/*" :on-change="(f) => extract(row, f)">
-            <el-button size="small">视频抽帧</el-button>
-          </el-upload>
-          <el-button size="small" type="warning" @click="$router.push({ path: '/annotate', query: { id: row.id } })">标注</el-button>
-          <el-button size="small" type="success" :loading="row._building" @click="build(row)">构建</el-button>
-          <el-button size="small" @click="open(row)">编辑</el-button>
-          <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          <span v-if="row.built">{{ row.trainCount }} / {{ row.valCount }}</span>
+          <span v-else class="hint">未构建</span>
+        </template>
+      </el-table-column>
+      <el-table-column prop="status" label="状态" width="120">
+        <template #default="{ row }">
+          <el-tag :type="statusType(row)">{{ statusText(row) }}</el-tag>
+          <el-progress
+            v-if="row.importJob"
+            :percentage="row.importJob.progress || 0"
+            :stroke-width="6"
+            style="margin-top:6px"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" min-width="640" fixed="right">
+        <template #default="{ row }">
+          <div class="ops">
+            <div class="ops-inline">
+              <el-upload :show-file-list="false" :auto-upload="false" multiple accept="image/*" :on-change="(f) => upload(row, f)">
+                <el-button size="small">上传图片</el-button>
+              </el-upload>
+              <el-upload :show-file-list="false" :auto-upload="false" accept="video/*" :on-change="(f) => extract(row, f)">
+                <el-button size="small">视频抽帧</el-button>
+              </el-upload>
+            </div>
+            <el-button size="small" type="primary" plain @click="browse(row)">打开</el-button>
+            <el-button size="small" type="warning" @click="$router.push({ path: '/annotate', query: { id: row.id } })">标注</el-button>
+            <el-button size="small" type="success" :disabled="row.status==='importing'" :loading="row._building" @click="build(row)">构建</el-button>
+            <el-button size="small" v-if="row.importJob && !row.importJob.paused" @click="pause(row)">暂停</el-button>
+            <el-button size="small" type="primary" v-if="row.importJob?.paused" @click="resume(row)">继续</el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              v-if="row.hasImport && row.failedCount > 0 && !row.importJob"
+              :loading="row._retrying"
+              @click="retry(row)"
+            >重试失败</el-button>
+            <el-button size="small" @click="open(row)">编辑</el-button>
+            <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -47,24 +108,143 @@
         <el-button type="primary" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="browseDlg" :title="browseTitle" width="860px" @closed="clearThumbs">
+      <div class="browse-bar">
+        <span class="hint">{{ browsePath }}</span>
+        <el-button size="small" type="primary" :disabled="!browseRow" @click="openFolder">在资源管理器中打开</el-button>
+        <el-button size="small" type="warning" :disabled="!browseRow" @click="goAnnotate()">去标注</el-button>
+      </div>
+      <el-empty v-if="!browseThumbs.length && !browseLoading" description="还没有图片，先上传或抽帧" />
+      <div v-loading="browseLoading" class="thumb-grid">
+        <div v-for="s in browseThumbs" :key="s.stem" class="thumb" @click="goAnnotate(s.stem)">
+          <img v-if="s.src" :src="s.src" />
+          <div class="thumb-name">{{ s.name }}</div>
+          <el-tag size="small" :type="s.annotated ? 'success' : 'info'">{{ s.annotated ? `已标 ${s.boxCount}` : '未标' }}</el-tag>
+        </div>
+      </div>
+      <div v-if="browseTotal > browseThumbs.length" class="hint">预览前 {{ browseThumbs.length }} 张，共 {{ browseTotal }} 张。完整检查请打开目录或进入标注。</div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { datasetApi } from '../api'
+import { useUserStore } from '../store/user'
 
+const router = useRouter()
+const store = useUserStore()
 const rows = ref([])
 const loading = ref(false)
 const dlg = ref(false)
+const importing = ref(false)
+const importJobId = ref('')
+const importPct = ref(0)
+const importStatus = ref('')
+const importHint = ref('')
+const importFailures = ref([])
 const form = reactive({ id: null, name: '', classNames: [], splitRatio: 0.8, description: '' })
+const browseDlg = ref(false)
+const browseRow = ref(null)
+const browseThumbs = ref([])
+const browseLoading = ref(false)
+const browseTotal = ref(0)
+const browsePath = ref('')
+const browseTitle = ref('打开数据集')
+let importTimer = null
+let listTimer = null
+
+function statusText(row) {
+  if (row.importJob?.paused) return '已暂停'
+  if (row.importJob || row.status === 'importing') return '下载中'
+  if (row.status === 'incomplete') return `缺 ${row.failedCount} 张`
+  if (row.status === 'ready') return '已构建'
+  if (row.status === 'raw') return '未构建'
+  return row.status
+}
+
+function statusType(row) {
+  if (row.importJob?.paused) return 'info'
+  if (row.importJob || row.status === 'importing') return 'warning'
+  if (row.status === 'incomplete') return 'danger'
+  if (row.status === 'ready') return 'success'
+  return 'info'
+}
+
+function anyActive(list = rows.value) {
+  return list.some((r) => r.importJob || r.status === 'importing')
+}
+
+function startListPoll() {
+  listTimer && clearInterval(listTimer)
+  listTimer = setInterval(async () => {
+    const res = await datasetApi.list()
+    rows.value = res.data.rows
+    if (!anyActive(res.data.rows)) {
+      clearInterval(listTimer)
+      listTimer = null
+    }
+  }, 1500)
+}
+
+async function onNdjson(f) {
+  const fd = new FormData()
+  fd.append('file', f.raw)
+  importing.value = true
+  importHint.value = '正在解析索引并后台下载图片'
+  try {
+    const res = await datasetApi.importNdjson(fd)
+    importJobId.value = res.data.jobId
+    importPct.value = 0
+    importStatus.value = 'running'
+    importFailures.value = []
+    ElMessage.success(res.message)
+    pollImport()
+    await load()
+    startListPoll()
+  } finally {
+    importing.value = false
+  }
+}
+
+function pollImport() {
+  importTimer && clearInterval(importTimer)
+  importTimer = setInterval(async () => {
+    const res = await datasetApi.importProgress(importJobId.value)
+    importPct.value = res.data.progress || 0
+    importStatus.value = res.data.status
+    const failed = res.data.failed || 0
+    const okCount = res.data.processed || 0
+    importFailures.value = res.data.failures || []
+    if (res.data.status === 'paused') {
+      importHint.value = `已暂停 ${okCount} / ${res.data.total || 0}，失败 ${failed}`
+      return
+    }
+    importHint.value = `已下载 ${okCount} / ${res.data.total || 0}，失败 ${failed}`
+    if (res.data.status === 'done' || res.data.status === 'failed') {
+      clearInterval(importTimer)
+      importTimer = null
+      if (res.data.status === 'done' && failed) {
+        ElMessage.warning(`导入未完整：成功 ${okCount} 张，失败 ${failed} 张，可点「重试失败」`)
+      } else if (res.data.status === 'done') {
+        ElMessage.success(`导入完成 train=${res.data.trainCount} val=${res.data.valCount}`)
+      } else {
+        ElMessage.error(res.data.error || '导入失败')
+      }
+      load()
+    }
+  }, 1500)
+}
 
 async function load() {
   loading.value = true
   try {
     const res = await datasetApi.list()
     rows.value = res.data.rows
+    if (anyActive(res.data.rows)) startListPoll()
   } finally {
     loading.value = false
   }
@@ -93,6 +273,7 @@ async function upload(row, f) {
   fd.append('files', f.raw)
   await datasetApi.upload(row.id, fd)
   ElMessage.success(`已上传 ${f.name}`)
+  load()
 }
 
 async function extract(row, f) {
@@ -103,6 +284,102 @@ async function extract(row, f) {
   ElMessage.info('正在抽帧…')
   await datasetApi.extract(row.id, fd)
   ElMessage.success('抽帧完成，可去标注')
+  load()
+}
+
+async function retry(row) {
+  if (!row.hasImport) {
+    ElMessage.warning('该数据集没有绑定自己的 NDJSON，不能重试其它数据集的下载')
+    return
+  }
+  row._retrying = true
+  try {
+    const res = await datasetApi.retryImport(row.id)
+    if (!res.data.missing) {
+      ElMessage.success(res.message)
+      load()
+      return
+    }
+    importJobId.value = res.data.jobId
+    importPct.value = 0
+    importStatus.value = 'running'
+    importFailures.value = []
+    importHint.value = res.message
+    ElMessage.success(res.message)
+    pollImport()
+    await load()
+    startListPoll()
+  } finally {
+    row._retrying = false
+  }
+}
+
+async function pause(row) {
+  await datasetApi.pauseImport(row.id)
+  ElMessage.success('已暂停')
+  load()
+}
+
+async function resume(row) {
+  const res = await datasetApi.resumeImport(row.id)
+  importJobId.value = res.data?.jobId || importJobId.value
+  importStatus.value = 'running'
+  importHint.value = '已继续下载'
+  ElMessage.success('已继续')
+  pollImport()
+  startListPoll()
+  load()
+}
+
+async function browse(row) {
+  browseRow.value = row
+  browseTitle.value = `打开数据集 · ${row.name}`
+  browsePath.value = row.folderPath || ''
+  browseDlg.value = true
+  browseLoading.value = true
+  browseTotal.value = row.imageCount || 0
+  try {
+    const res = await datasetApi.samples(row.id)
+    browsePath.value = res.data.folderPath || browsePath.value
+    const list = (res.data.samples || []).slice(0, 60)
+    browseTotal.value = (res.data.samples || []).length
+    const thumbs = []
+    for (let i = 0; i < list.length; i += 8) {
+      const part = list.slice(i, i + 8)
+      const chunk = await Promise.all(part.map(async (s) => {
+        const imgRes = await fetch(datasetApi.imageUrl(row.id, s.stem), {
+          headers: { Authorization: `Bearer ${store.token}` },
+        })
+        const blob = await imgRes.blob()
+        return { ...s, src: URL.createObjectURL(blob) }
+      }))
+      thumbs.push(...chunk)
+      browseThumbs.value = [...thumbs]
+    }
+  } finally {
+    browseLoading.value = false
+  }
+}
+
+function clearThumbs() {
+  browseThumbs.value.forEach((t) => t.src && URL.revokeObjectURL(t.src))
+  browseThumbs.value = []
+  browseRow.value = null
+}
+
+async function openFolder() {
+  if (!browseRow.value) return
+  const res = await datasetApi.openFolder(browseRow.value.id)
+  ElMessage.success(res.message || '已打开')
+}
+
+function goAnnotate(stem) {
+  const id = browseRow.value?.id
+  if (!id) return
+  browseDlg.value = false
+  const query = { id }
+  if (typeof stem === 'string' && stem) query.stem = stem
+  router.push({ path: '/annotate', query })
 }
 
 async function build(row) {
@@ -123,4 +400,20 @@ async function remove(row) {
 }
 
 onMounted(load)
+onUnmounted(() => {
+  importTimer && clearInterval(importTimer)
+  listTimer && clearInterval(listTimer)
+  clearThumbs()
+})
 </script>
+
+<style scoped>
+.ops { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.ops-inline { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 4px; }
+.ops :deep(.el-upload) { display: inline-flex; }
+.browse-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.thumb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; max-height: 520px; overflow: auto; }
+.thumb { background: #f5f7fa; border: 1px solid #ebeef5; border-radius: 6px; padding: 6px; cursor: pointer; }
+.thumb img { width: 100%; height: 100px; object-fit: cover; border-radius: 4px; display: block; }
+.thumb-name { font-size: 12px; margin: 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
