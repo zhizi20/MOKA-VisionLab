@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 import cv2
-from flask import Blueprint, current_app, request, send_file
+from flask import Blueprint, after_this_request, current_app, request, send_file
 
 from class_colors import (
     load_dataset_colors,
@@ -37,7 +37,8 @@ from ndjson_import import (
 from routes.models import resolve_weight
 from security import login_required
 from smart_label import sam_click_box, yolo_prelabel
-from storage import assign_dataset_folder, dataset_dir
+from dataset_pack import extract_zip, read_manifest, write_dataset_zip
+from storage import assign_dataset_folder, dataset_dir, rewrite_data_yaml, slugify
 from utils import fail, ok
 
 datasets_bp = Blueprint("datasets", __name__, url_prefix="/api/datasets")
@@ -442,6 +443,136 @@ def retry_import(did: int):
         {"jobId": job_id, "datasetId": ds.id, "missing": len(missing), "total": len(images)},
         f"开始补下 {len(missing)} 张失败图片",
     )
+
+
+@datasets_bp.get("/<int:did>/export")
+@login_required
+def export_dataset(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    img_dir = _raw_images(ds)
+    if not img_dir.exists() or not any(img_dir.iterdir()):
+        return fail("这个数据集还没有图片，先上传或标注再导出")
+    names = _classes(ds)
+    Config.TMP_FOLDER.mkdir(parents=True, exist_ok=True)
+    zip_path = Config.TMP_FOLDER / f"export_{ds.id}_{uuid.uuid4().hex}.zip"
+    write_dataset_zip(
+        _ds_dir(ds),
+        zip_path,
+        {
+            "name": ds.name,
+            "classNames": names,
+            "splitRatio": ds.split_ratio,
+            "description": ds.description or "",
+            "status": ds.status,
+            "trainCount": ds.train_count,
+            "valCount": ds.val_count,
+        },
+    )
+
+    @after_this_request
+    def _cleanup(response):
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return response
+
+    filename = f"{slugify(ds.name, 'dataset')}.zip"
+    return send_file(zip_path, as_attachment=True, download_name=filename, mimetype="application/zip")
+
+
+@datasets_bp.post("/import-zip")
+@login_required
+def import_zip():
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return fail("请选择导出的 .zip 数据包")
+    if not f.filename.lower().endswith(".zip"):
+        return fail("请选择 .zip 文件")
+    Config.TMP_FOLDER.mkdir(parents=True, exist_ok=True)
+    tmp_zip = Config.TMP_FOLDER / f"_import_{uuid.uuid4().hex}.zip"
+    tmp_dir = Config.TMP_FOLDER / f"_unpack_{uuid.uuid4().hex}"
+    f.save(tmp_zip)
+    try:
+        root = extract_zip(tmp_zip, tmp_dir)
+        meta = read_manifest(root)
+        raw_images = root / "raw" / "images"
+        if not raw_images.is_dir() or not any(raw_images.iterdir()):
+            return fail("数据包里没有图片（raw/images 为空）")
+        names = meta.get("classNames") or []
+        if isinstance(names, str):
+            names = [x.strip() for x in names.split(",") if x.strip()]
+        names = [str(x).strip() for x in names if str(x).strip()]
+        if not names:
+            names = _classes_from_labels(root / "raw" / "labels") or ["object"]
+        name = (meta.get("name") or Path(f.filename).stem or "imported").strip()
+        ds = Dataset(
+            name=name,
+            class_names=",".join(names),
+            split_ratio=float(meta.get("splitRatio") or 0.8),
+            description=meta.get("description") or "从 ZIP 数据包导入",
+            status="raw",
+        )
+        db.session.add(ds)
+        db.session.commit()
+        dest = assign_dataset_folder(ds)
+        db.session.commit()
+        _copy_pack_into(root, dest)
+        rewrite_data_yaml(dest)
+        names = _classes(ds)
+        colors = load_dataset_colors(dest, names)
+        save_dataset_colors(dest, colors)
+        update_global_colors(Config.UPLOAD_FOLDER, names, colors)
+        image_count, labeled_count = _image_stats(ds)
+        yolo_ok = (dest / "yolo" / "images" / "train").exists() and (dest / "yolo" / "images" / "val").exists()
+        if yolo_ok:
+            train_n = len([p for p in (dest / "yolo" / "images" / "train").iterdir() if p.is_file()])
+            val_n = len([p for p in (dest / "yolo" / "images" / "val").iterdir() if p.is_file()])
+            ds.train_count = train_n
+            ds.val_count = val_n
+            ds.status = "ready" if train_n and val_n else "raw"
+        else:
+            ds.status = "raw"
+        db.session.commit()
+        msg = f"已导入 {image_count} 张图"
+        if labeled_count:
+            msg += f"，其中 {labeled_count} 张已标注"
+        if ds.status == "ready":
+            msg += "，可直接去训练"
+        else:
+            msg += "。需要的话再点「构建」"
+        return ok(_to_dict(ds), msg)
+    except Exception as exc:  # noqa: BLE001
+        return fail(f"导入失败：{exc}")
+    finally:
+        tmp_zip.unlink(missing_ok=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _copy_pack_into(root: Path, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in ("raw", "yolo", "colors.json"):
+        src = root / name
+        if src.is_dir():
+            target = dest / name
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(src, target)
+        elif src.is_file():
+            shutil.copy2(src, dest / name)
+
+
+def _classes_from_labels(label_dir: Path) -> list[str]:
+    ids: set[int] = set()
+    if not label_dir.is_dir():
+        return []
+    for path in label_dir.glob("*.txt"):
+        ids.update(_label_class_ids(path))
+    if not ids:
+        return []
+    return [str(i) for i in range(max(ids) + 1)]
 
 
 @datasets_bp.post("")

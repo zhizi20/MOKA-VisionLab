@@ -7,16 +7,21 @@
       </div>
       <div class="tb-group">
         <div class="tb-label">导入现成标注</div>
-        <el-upload :show-file-list="false" :auto-upload="false" accept=".ndjson" :on-change="onNdjson">
-          <el-button type="success" plain :loading="importing" title="导入 Ultralytics 的 .ndjson 数据包">导入 NDJSON</el-button>
-        </el-upload>
+        <div class="tb-row">
+          <el-upload :show-file-list="false" :auto-upload="false" accept=".ndjson" :on-change="onNdjson">
+            <el-button type="success" plain :loading="importing" title="导入 Ultralytics 的 .ndjson 数据包">导入 NDJSON</el-button>
+          </el-upload>
+          <el-upload :show-file-list="false" :auto-upload="false" accept=".zip" :on-change="onZip">
+            <el-button type="success" :loading="importingZip" title="导入别人用本软件「导出」的 ZIP 包">导入 ZIP</el-button>
+          </el-upload>
+        </div>
       </div>
       <div class="tb-group">
         <div class="tb-label">列表</div>
         <el-button @click="load">刷新</el-button>
       </div>
     </div>
-    <p class="howto">流程：新建或导入 → 上传图片（或视频抽帧）→ 去「数据标注」画框 → 回来点「构建」划分训练/验证 → 再去「训练任务」。</p>
+    <p class="howto">流程：新建或导入 → 上传图片（或视频抽帧）→ 去「数据标注」画框 → 回来点「构建」划分训练/验证 → 再去「训练任务」。要把数据给别人：点「导出」下载 ZIP，对方点「导入 ZIP」。</p>
     <el-alert
       v-if="importHint"
       class="page-card"
@@ -85,6 +90,7 @@
             <el-button size="small" type="primary" plain title="预览图片和磁盘路径" @click="browse(row)">打开</el-button>
             <el-button size="small" type="warning" title="给图片画检测框" @click="$router.push({ path: '/annotate', query: { id: row.id } })">标注</el-button>
             <el-button size="small" type="success" :disabled="row.status==='importing'" :loading="row._building" title="按训练比例划分 train/val，训练前必须点一次" @click="build(row)">构建</el-button>
+            <el-button size="small" :loading="row._exporting" title="打包图片和标注，发给别人下载" @click="exportZip(row)">导出</el-button>
             <el-button size="small" v-if="row.importJob && !row.importJob.paused" @click="pause(row)">暂停</el-button>
             <el-button size="small" type="primary" v-if="row.importJob?.paused" @click="resume(row)">继续</el-button>
             <el-button
@@ -152,6 +158,7 @@ const rows = ref([])
 const loading = ref(false)
 const dlg = ref(false)
 const importing = ref(false)
+const importingZip = ref(false)
 const importJobId = ref('')
 const importPct = ref(0)
 const importStatus = ref('')
@@ -199,6 +206,40 @@ function startListPoll() {
       listTimer = null
     }
   }, 1500)
+}
+
+async function onZip(f) {
+  const fd = new FormData()
+  fd.append('file', f.raw)
+  importingZip.value = true
+  try {
+    const res = await datasetApi.importZip(fd)
+    ElMessage.success(res.message || '已导入')
+    load()
+  } finally {
+    importingZip.value = false
+  }
+}
+
+async function exportZip(row) {
+  row._exporting = true
+  try {
+    const blob = await datasetApi.exportZip(row.id)
+    if (blob.type && blob.type.includes('json')) {
+      const body = JSON.parse(await blob.text())
+      ElMessage.error(body.message || '导出失败')
+      return
+    }
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${row.name || 'dataset'}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('已开始下载数据包，发给别人即可')
+  } finally {
+    row._exporting = false
+  }
 }
 
 async function onNdjson(f) {

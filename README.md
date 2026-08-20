@@ -23,10 +23,6 @@
 
 ## 启动
 
-双击仓库根目录的 `start.bat`。不要用 `powershell -File start.ps1` 作为首选（旧脚本会因编码解析失败）。
-
-会弹出「后端」「前端」两个黑窗口，并打开浏览器。关掉那两个窗口即停止服务。
-
 | 用途 | 地址 |
 |------|------|
 | **网页界面（用这个）** | http://127.0.0.1:5174 |
@@ -34,7 +30,13 @@
 | 后端 API（不是页面） | http://127.0.0.1:8000 |
 | 健康检查 | http://127.0.0.1:8000/api/health |
 
-默认账号 `admin` / `admin123`。局域网同一网段可用本机 IP 的 `5174` 端口。
+默认账号 `admin` / `admin123`。局域网同一网段可用本机 IP 的 `5174` 端口。只开后端、不经过前端时，浏览器访问 `http://127.0.0.1:8000/` 会看到说明页。
+
+### Windows
+
+双击仓库根目录的 `start.bat`。不要用 `powershell -File start.ps1` 作为首选（旧脚本会因编码解析失败）。
+
+会弹出「后端」「前端」两个黑窗口，并打开浏览器。关掉那两个窗口即停止服务。
 
 首次需要环境时：
 
@@ -43,8 +45,6 @@ powershell -File backend\scripts\setup_venv.ps1
 cd frontend
 npm install
 ```
-
-只开后端、不经过前端时，浏览器访问 `http://127.0.0.1:8000/` 会看到说明页。
 
 也可手动启动：
 
@@ -56,12 +56,59 @@ npm install
 npm run dev
 ```
 
+### Linux
+
+需要 **Python 3.10+**（推荐 3.12）和 **Node.js 18+**。Debian / Ubuntu 示例：
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git libgl1
+# Node 18+：发行版自带太旧时，用 nvm 或 NodeSource 安装
+#   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+#   sudo apt install -y nodejs
+```
+
+克隆后一键启动（首次会自动建虚拟环境并 `npm install`）：
+
+```bash
+git clone https://github.com/zhizi20/AI-DetectLab.git
+cd AI-DetectLab
+chmod +x start.sh backend/scripts/setup_venv.sh
+./start.sh
+```
+
+浏览器打开 http://127.0.0.1:5174 ，登录 `admin` / `admin123`。按 **Ctrl+C** 同时停掉后端和前端。
+
+也可分两个终端手动启动：
+
+```bash
+# 首次：创建虚拟环境并安装依赖（默认 CPU 版 PyTorch）
+bash backend/scripts/setup_venv.sh
+cd frontend && npm install && cd ..
+
+# 终端 1：后端
+cd backend
+.venv/bin/python app.py
+
+# 终端 2：前端
+cd frontend
+npm run dev
+```
+
+有 NVIDIA GPU、想装 CUDA 版 PyTorch 时：
+
+```bash
+TORCH_INDEX=https://download.pytorch.org/whl/cu124 bash backend/scripts/setup_venv.sh
+```
+
+训练页选 **GPU 0**。机器够用可在 `backend/.env` 写 `DETECTLAB_CPU_SAFE=0` 后重启后端，解除 CPU 的 batch 限制。
+
 ## 推荐流程
 
 1. 模型管理 → 一键登记 YOLO11n（首次会从 HuggingFace 镜像 / GitHub 代理下载权重；直连 github.com 在国内常超时）
 2. 数据集 → 新建类别 → 上传图片或视频抽帧
 3. 标注 → 画框 / 预标 / SAM 点选 → 保存
-4. 数据集 → 构建（至少 2 张已标注图）
+4. 数据集 → 构建（至少 2 张已标注图）。要把数据给别人：点「导出」下载 ZIP，对方用「导入 ZIP」。
 5. 训练任务 → 创建并启动。本机 CPU 默认保护：batch≤4、imgsz≤640。更好的机器在 `backend/.env` 写 `DETECTLAB_CPU_SAFE=0` 后重启后端即可放松限制。
 6. 用产出的 `best.pt` 做图片/视频检测
 

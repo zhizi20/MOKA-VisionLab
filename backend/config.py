@@ -38,7 +38,7 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": {"check_same_thread": False}}
     JSON_AS_ASCII = False
-    MAX_CONTENT_LENGTH = 500 * 1024 * 1024
+    MAX_CONTENT_LENGTH = _env_int("MAX_CONTENT_LENGTH", 4 * 1024 * 1024 * 1024)
 
     UPLOAD_FOLDER = BASE_DIR / "uploads"
     DATASET_FOLDER = UPLOAD_FOLDER / "datasets"
