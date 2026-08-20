@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -173,23 +174,130 @@ PLOT_LABELS = {
     "R_curve.png": "Recall 曲线",
     "BoxR_curve.png": "Recall 曲线",
     "labels.jpg": "标签分布",
-    "train_batch0.jpg": "训练 batch 样例",
-    "val_batch0_labels.jpg": "验证标签",
-    "val_batch0_pred.jpg": "验证预测",
 }
 
+_PLOT_NAME_RULES = (
+    (re.compile(r"^train_batch(\d+)\.(?:jpg|jpeg|png)$", re.I), "训练样例 {0}"),
+    (re.compile(r"^val_batch(\d+)_labels\.(?:jpg|jpeg|png)$", re.I), "验证标签 {0}"),
+    (re.compile(r"^val_batch(\d+)_pred\.(?:jpg|jpeg|png)$", re.I), "验证预测 {0}"),
+)
 
-def _list_plots(job_id: int) -> list[dict]:
+_PLOT_PATCHED = False
+
+
+class _NameMap(dict):
+    """Ultralytics 画框时 cls 常是 numpy 整数，按 int 查类别名。"""
+
+    def get(self, key, default=None):
+        try:
+            key = int(key)
+        except (TypeError, ValueError):
+            pass
+        return super().get(key, default)
+
+
+def _class_names_map(raw) -> _NameMap:
+    mapping = _NameMap()
+    if isinstance(raw, dict):
+        items = raw.items()
+    elif isinstance(raw, (list, tuple)):
+        items = enumerate(raw)
+    else:
+        return mapping
+    for key, value in items:
+        try:
+            mapping[int(key)] = str(value)
+        except (TypeError, ValueError):
+            continue
+    return mapping
+
+
+def _dataset_class_names(ds) -> list[str]:
+    if ds is None:
+        return []
+    return [c.strip() for c in (ds.class_names or "").split(",") if c.strip()]
+
+
+def _plot_label(name: str) -> str:
+    if name in PLOT_LABELS:
+        return PLOT_LABELS[name]
+    for pattern, template in _PLOT_NAME_RULES:
+        match = pattern.fullmatch(name)
+        if match:
+            return template.format(match.group(1))
+    return Path(name).stem
+
+
+def _ensure_plot_names_patch() -> None:
+    """YOLO 训练画 train_batch 时默认不传 names，框上只会显示 0/1/2。"""
+    global _PLOT_PATCHED
+    if _PLOT_PATCHED:
+        return
+    from ultralytics.models.yolo.detect.train import DetectionTrainer
+    from ultralytics.utils.plotting import plot_images
+
+    def plot_training_samples(self, batch, ni):
+        names = _class_names_map(getattr(self, "data", {}).get("names"))
+        plot_images(
+            labels=batch,
+            paths=batch["im_file"],
+            fname=self.save_dir / f"train_batch{ni}.jpg",
+            names=names,
+            on_plot=self.on_plot,
+        )
+
+    DetectionTrainer.plot_training_samples = plot_training_samples
+    _PLOT_PATCHED = True
+
+
+def _stamp_batch_legend(path: Path, names: dict[int, str]) -> None:
+    """给已生成的 train_batch 图补类别图例，旧任务不用重训也能看懂。"""
+    if not names or not path.is_file():
+        return
+    if not re.fullmatch(r"train_batch\d+\.(?:jpg|jpeg|png)", path.name, re.I):
+        return
+    marker = path.parent / f".{path.name}.legend"
+    if marker.exists():
+        return
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return
+    text = "    ".join(f"{idx} {names[idx]}" for idx in sorted(names))
+    try:
+        image = Image.open(path).convert("RGB")
+        bar_h = 40
+        canvas = Image.new("RGB", (image.width, image.height + bar_h), (15, 23, 36))
+        canvas.paste(image, (0, 0))
+        draw = ImageDraw.Draw(canvas)
+        try:
+            font = ImageFont.truetype("arial.ttf", 16)
+        except OSError:
+            font = ImageFont.load_default()
+        draw.text((12, image.height + 10), text, fill=(226, 232, 240), font=font)
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            canvas.save(path, quality=95)
+        else:
+            canvas.save(path)
+        marker.write_text(text, encoding="utf-8")
+    except Exception:
+        return
+
+
+def _list_plots(job_id: int, class_names: list[str] | None = None) -> list[dict]:
     exp = _exp_dir(job_id)
     if not exp.exists():
         return []
+    names = _class_names_map(class_names or [])
     items = []
     for path in sorted(exp.iterdir(), key=lambda p: p.name.lower()):
         if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
             continue
+        _stamp_batch_legend(path, names)
         items.append({
             "name": path.name,
-            "label": PLOT_LABELS.get(path.name, path.stem),
+            "label": _plot_label(path.name),
             "size": path.stat().st_size,
             "mtime": int(path.stat().st_mtime),
         })
@@ -320,7 +428,9 @@ def get_job(jid: int):
         return fail("任务不存在", 404)
     ds = db.session.get(Dataset, job.dataset_id)
     data = _job_dict(job, ds.name if ds else "")
-    data["plots"] = _list_plots(jid)
+    class_names = _dataset_class_names(ds)
+    data["classNames"] = class_names
+    data["plots"] = _list_plots(jid, class_names)
     data["history"] = _read_results_csv(_exp_dir(jid) / "results.csv")
     return ok(data)
 
@@ -375,6 +485,7 @@ def _run_train(app, job_id: int):
             if not yaml_path.exists():
                 raise RuntimeError("找不到 data.yaml，请先构建数据集")
             _clamp_job_params(job)
+            _ensure_plot_names_patch()
             job.log_tail = "正在准备基座权重（GitHub 超时会自动换镜像）..."
             db.session.commit()
             out_dir = assign_train_folder(job)

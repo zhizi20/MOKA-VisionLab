@@ -1,12 +1,22 @@
 <template>
   <div>
     <div class="toolbar">
-      <el-button type="primary" @click="open()">新建数据集</el-button>
-      <el-upload :show-file-list="false" :auto-upload="false" accept=".ndjson" :on-change="onNdjson">
-        <el-button type="success" plain :loading="importing">导入 Ultralytics NDJSON</el-button>
-      </el-upload>
-      <el-button @click="load">刷新</el-button>
+      <div class="tb-group">
+        <div class="tb-label">新建</div>
+        <el-button type="primary" @click="open()">新建数据集</el-button>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">导入现成标注</div>
+        <el-upload :show-file-list="false" :auto-upload="false" accept=".ndjson" :on-change="onNdjson">
+          <el-button type="success" plain :loading="importing" title="导入 Ultralytics 的 .ndjson 数据包">导入 NDJSON</el-button>
+        </el-upload>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">列表</div>
+        <el-button @click="load">刷新</el-button>
+      </div>
     </div>
+    <p class="howto">流程：新建或导入 → 上传图片（或视频抽帧）→ 去「数据标注」画框 → 回来点「构建」划分训练/验证 → 再去「训练任务」。</p>
     <el-alert
       v-if="importHint"
       class="page-card"
@@ -66,15 +76,15 @@
           <div class="ops">
             <div class="ops-inline">
               <el-upload :show-file-list="false" :auto-upload="false" multiple accept="image/*" :on-change="(f) => upload(row, f)">
-                <el-button size="small">上传图片</el-button>
+                <el-button size="small" title="把图片加进这个数据集">上传图片</el-button>
               </el-upload>
               <el-upload :show-file-list="false" :auto-upload="false" accept="video/*" :on-change="(f) => extract(row, f)">
-                <el-button size="small">视频抽帧</el-button>
+                <el-button size="small" title="从视频里抽出图片当训练样本">视频抽帧</el-button>
               </el-upload>
             </div>
-            <el-button size="small" type="primary" plain @click="browse(row)">打开</el-button>
-            <el-button size="small" type="warning" @click="$router.push({ path: '/annotate', query: { id: row.id } })">标注</el-button>
-            <el-button size="small" type="success" :disabled="row.status==='importing'" :loading="row._building" @click="build(row)">构建</el-button>
+            <el-button size="small" type="primary" plain title="预览图片和磁盘路径" @click="browse(row)">打开</el-button>
+            <el-button size="small" type="warning" title="给图片画检测框" @click="$router.push({ path: '/annotate', query: { id: row.id } })">标注</el-button>
+            <el-button size="small" type="success" :disabled="row.status==='importing'" :loading="row._building" title="按训练比例划分 train/val，训练前必须点一次" @click="build(row)">构建</el-button>
             <el-button size="small" v-if="row.importJob && !row.importJob.paused" @click="pause(row)">暂停</el-button>
             <el-button size="small" type="primary" v-if="row.importJob?.paused" @click="resume(row)">继续</el-button>
             <el-button
@@ -94,14 +104,15 @@
 
     <el-dialog v-model="dlg" :title="form.id ? '编辑数据集' : '新建数据集'" width="520px">
       <el-form label-width="90px">
-        <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
+        <el-form-item label="名称" required><el-input v-model="form.name" placeholder="例如：烟雾检测" /></el-form-item>
         <el-form-item label="类别" required>
-          <el-select v-model="form.classNames" multiple filterable allow-create default-first-option placeholder="如 fire, smoke" style="width:100%" />
+          <el-select v-model="form.classNames" multiple filterable allow-create default-first-option placeholder="要识别的东西，如 fire、smoke，回车添加" style="width:100%" />
         </el-form-item>
         <el-form-item label="训练比例">
           <el-slider v-model="form.splitRatio" :min="0.5" :max="0.95" :step="0.05" show-input />
+          <div class="hint">拿去训练的占比，剩下的用来验证。一般 0.8 即可。</div>
         </el-form-item>
-        <el-form-item label="说明"><el-input v-model="form.description" type="textarea" /></el-form-item>
+        <el-form-item label="说明"><el-input v-model="form.description" type="textarea" placeholder="可选，方便以后认出这批数据" /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dlg = false">取消</el-button>

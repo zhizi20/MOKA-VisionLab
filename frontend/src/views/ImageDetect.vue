@@ -1,6 +1,7 @@
 <template>
   <div>
     <el-card class="page-card">
+      <p class="howto">选已下载的模型 → 选一张图 → 开始检测。置信度越高越严（框更少）；越低越容易把背景也框进去。</p>
       <el-form :inline="true">
         <el-form-item label="模型">
           <el-select v-model="modelId" placeholder="选择已启用且有权重的模型" style="width: 280px">
@@ -10,7 +11,7 @@
         <el-form-item :label="`置信度 ${conf}`">
           <el-slider v-model="conf" :min="0.05" :max="0.95" :step="0.05" style="width: 140px" />
         </el-form-item>
-        <el-form-item :label="`IoU ${iou}`">
+        <el-form-item :label="`重叠过滤 ${iou}`">
           <el-slider v-model="iou" :min="0.1" :max="0.95" :step="0.05" style="width: 140px" />
         </el-form-item>
         <el-form-item>

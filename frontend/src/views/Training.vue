@@ -1,9 +1,15 @@
 <template>
   <div>
     <div class="toolbar">
-      <el-button type="primary" @click="open">新建任务</el-button>
-      <el-button @click="load()">刷新</el-button>
+      <div class="tb-group">
+        <div class="tb-label">任务</div>
+        <div class="tb-row">
+          <el-button type="primary" @click="open">新建任务</el-button>
+          <el-button @click="load()">刷新</el-button>
+        </div>
+      </div>
     </div>
+    <p class="howto">流程：选已「构建」的数据集 → 选基座模型 → 创建任务 → 点「启动」。本机只用 CPU 时请用较小的每批张数，避免卡死。</p>
     <el-table :data="rows" v-loading="loading" border stripe>
       <el-table-column prop="jobName" label="任务" min-width="140" />
       <el-table-column prop="datasetName" label="数据集" min-width="120" />
@@ -35,29 +41,38 @@
         type="warning"
         :closable="false"
         show-icon
-        title="当前是 CPU 保护模式（适合本机测试）。batch 会被限制，避免把电脑卡死。更好的机器可在 backend/.env 设置 DETECTLAB_CPU_SAFE=0 后重启后端。"
+        title="当前是 CPU 保护模式（适合本机测试）。每批张数会被限制，避免把电脑卡死。更好的机器可在 backend/.env 设置 DETECTLAB_CPU_SAFE=0 后重启后端。"
         style="margin-bottom:12px"
       />
       <el-form label-width="100px">
-        <el-form-item label="任务名" required><el-input v-model="form.jobName" /></el-form-item>
+        <el-form-item label="任务名" required><el-input v-model="form.jobName" placeholder="方便以后认出这次训练" /></el-form-item>
         <el-form-item label="数据集" required>
-          <el-select v-model="form.datasetId" style="width:100%">
+          <el-select v-model="form.datasetId" style="width:100%" placeholder="只显示已构建的数据集">
             <el-option v-for="d in readyDs" :key="d.id" :label="`${d.name} (${d.trainCount}/${d.valCount})`" :value="d.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="基座">
-          <el-select v-model="form.baseModel" filterable style="width:100%" placeholder="内置 YOLO 或已有模型">
+        <el-form-item label="基座模型">
+          <el-select v-model="form.baseModel" filterable style="width:100%" placeholder="从哪个预训练权重开始学">
             <el-option-group v-for="g in baseGroups" :key="g.label" :label="g.label">
               <el-option v-for="b in g.options" :key="b.value" :label="b.label" :value="b.value" />
             </el-option-group>
           </el-select>
         </el-form-item>
-        <el-form-item label="epochs"><el-input-number v-model="form.epochs" :min="1" :max="limits.maxEpochs" /></el-form-item>
-        <el-form-item label="batch"><el-input-number v-model="form.batch" :min="1" :max="batchMax" /></el-form-item>
-        <el-form-item label="imgsz"><el-input-number v-model="form.imgsz" :min="320" :max="imgMax" :step="32" /></el-form-item>
+        <el-form-item label="训练轮数">
+          <el-input-number v-model="form.epochs" :min="1" :max="limits.maxEpochs" />
+          <span class="hint">看完全部图片一遍算 1 轮</span>
+        </el-form-item>
+        <el-form-item label="每批张数">
+          <el-input-number v-model="form.batch" :min="1" :max="batchMax" />
+          <span class="hint">越大越快，也越吃内存</span>
+        </el-form-item>
+        <el-form-item label="图片边长">
+          <el-input-number v-model="form.imgsz" :min="320" :max="imgMax" :step="32" />
+          <span class="hint">输入尺寸，一般 640</span>
+        </el-form-item>
         <el-form-item label="设备">
           <el-radio-group v-model="form.device">
-            <el-radio value="cpu">CPU</el-radio>
+            <el-radio value="cpu">CPU（本机没显卡）</el-radio>
             <el-radio value="0">GPU 0</el-radio>
           </el-radio-group>
         </el-form-item>
@@ -106,14 +121,27 @@
       </el-table>
 
       <h4 class="sec">训练图像</h4>
+      <p v-if="classLegend" class="howto">框上的数字对应：{{ classLegend }}</p>
       <p v-if="!plotImages.length" class="hint">训练开始后会出现曲线和样例图；完成后会有混淆矩阵、PR 曲线等。</p>
       <div v-else class="plot-grid">
-        <figure v-for="im in plotImages" :key="im.name">
-          <el-image :src="im.url" :preview-src-list="plotUrls" fit="contain" class="plot-img" />
+        <figure v-for="(im, idx) in plotImages" :key="im.key || im.name" class="plot-card">
+          <button type="button" class="plot-hit" :title="im.label" @click="openPreview(idx)">
+            <img :src="im.url" class="plot-img" :alt="im.label" />
+          </button>
           <figcaption>{{ im.label }}</figcaption>
         </figure>
       </div>
     </el-dialog>
+    <el-image-viewer
+      v-if="previewVisible"
+      :url-list="plotUrls"
+      :initial-index="previewIndex"
+      teleported
+      :z-index="4000"
+      hide-on-click-modal
+      @close="previewVisible = false"
+      @switch="onPreviewSwitch"
+    />
   </div>
 </template>
 
@@ -131,12 +159,19 @@ const detailDlg = ref(false)
 const detailJob = ref(null)
 const history = ref([])
 const plotImages = ref([])
+const previewVisible = ref(false)
+const previewIndex = ref(0)
 const form = reactive({ jobName: '', datasetId: null, baseModel: 'yolo26n.pt', epochs: 20, batch: 2, imgsz: 640, device: 'cpu' })
 const limits = reactive({ cpuSafe: true, cpuMaxBatch: 4, cpuMaxImgsz: 640, gpuMaxBatch: 32, gpuMaxImgsz: 1280, maxEpochs: 300 })
 const readyDs = computed(() => datasets.value.filter((d) => d.status === 'ready'))
 const batchMax = computed(() => (form.device === 'cpu' ? limits.cpuMaxBatch : limits.gpuMaxBatch))
 const imgMax = computed(() => (form.device === 'cpu' ? limits.cpuMaxImgsz : limits.gpuMaxImgsz))
 const plotUrls = computed(() => plotImages.value.map((im) => im.url))
+const classLegend = computed(() => {
+  const names = detailJob.value?.classNames || []
+  if (!names.length) return ''
+  return names.map((name, i) => `${i} ${name}`).join('  ·  ')
+})
 const baseGroups = computed(() => {
   const map = new Map()
   for (const b of bases.value) {
@@ -163,10 +198,20 @@ function pick(row, keys) {
 }
 
 function revokePlots() {
+  previewVisible.value = false
   for (const im of plotImages.value) {
     if (im.url) URL.revokeObjectURL(im.url)
   }
   plotImages.value = []
+}
+
+function openPreview(idx) {
+  previewIndex.value = idx
+  previewVisible.value = true
+}
+
+function onPreviewSwitch(idx) {
+  previewIndex.value = idx
 }
 
 async function loadPlots(id) {
@@ -284,10 +329,21 @@ onUnmounted(() => {
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 12px;
 }
+.plot-card { margin: 0; }
+.plot-hit {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: #0f1724;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
 .plot-img {
   width: 100%;
   height: 180px;
-  background: #0f1724;
+  object-fit: contain;
+  display: block;
   border-radius: 8px;
 }
 figure { margin: 0; }

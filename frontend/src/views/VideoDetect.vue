@@ -1,16 +1,17 @@
 <template>
   <div>
     <el-card class="page-card">
+      <p class="howto">选已下载的模型 → 选一段视频 → 开始检测。跑完后可下载带框的结果视频。置信度越高越严（框更少）。</p>
       <el-form :inline="true">
         <el-form-item label="模型">
-          <el-select v-model="modelId" placeholder="选择模型" style="width: 280px">
+          <el-select v-model="modelId" placeholder="选择已启用且有权重的模型" style="width: 280px">
             <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
           </el-select>
         </el-form-item>
         <el-form-item :label="`置信度 ${conf}`">
           <el-slider v-model="conf" :min="0.05" :max="0.95" :step="0.05" style="width: 140px" />
         </el-form-item>
-        <el-form-item :label="`IoU ${iou}`">
+        <el-form-item :label="`重叠过滤 ${iou}`">
           <el-slider v-model="iou" :min="0.1" :max="0.95" :step="0.05" style="width: 140px" />
         </el-form-item>
         <el-form-item>

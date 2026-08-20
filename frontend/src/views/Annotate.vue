@@ -1,48 +1,107 @@
 <template>
   <div class="ann">
     <div class="toolbar">
-      <el-select v-model="datasetId" placeholder="选择数据集" style="width:240px" @change="onDatasetChange">
-        <el-option v-for="d in datasets" :key="d.id" :label="`${d.name}（${d.classNames.join(', ')}）`" :value="d.id" />
-      </el-select>
-      <el-tag v-if="stats.total">共 {{ stats.total }}</el-tag>
-      <el-tag v-if="stats.annotated" type="success">已标 {{ stats.annotated }}</el-tag>
-      <el-select v-model="filterCls" placeholder="筛选" style="width:150px" @change="onFilter">
-        <el-option label="全部图片" value="all" />
-        <el-option label="未标注" value="unlabeled" />
-        <el-option v-for="(c, i) in classNames" :key="c" :label="`含 ${c}`" :value="String(i)" />
-      </el-select>
-      <el-select v-model="clsId" placeholder="当前类别" style="width:140px">
-        <el-option v-for="(c, i) in classNames" :key="c" :label="c" :value="i" />
-      </el-select>
-      <el-color-picker v-if="classNames.length" :model-value="classColors[clsId]" @change="onColorChange" />
-      <el-radio-group v-model="mode" size="small">
-        <el-radio-button value="draw">画框</el-radio-button>
-        <el-radio-button value="pan">拖动图片</el-radio-button>
-        <el-radio-button value="sam">SAM 点选</el-radio-button>
-      </el-radio-group>
-      <el-button-group>
-        <el-button size="small" @click="nudgeZoom(1 / 1.25)">缩小</el-button>
-        <el-button size="small" @click="zoomFit">{{ zoomLabel }}</el-button>
-        <el-button size="small" @click="nudgeZoom(1.25)">放大</el-button>
-      </el-button-group>
-      <el-select v-model="preModelId" placeholder="预标模型" clearable style="width:180px">
-        <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
-      </el-select>
-      <el-button :disabled="!preModelId || !current" :loading="preLoading" @click="prelabel(false)">预标本图</el-button>
-      <el-button :disabled="!preModelId" :loading="preAllLoading" @click="prelabel(true)">预标全部</el-button>
-      <el-button :disabled="!canUndo" @click="undo">撤销</el-button>
-      <el-button :disabled="!canRedo" @click="redo">重做</el-button>
-      <el-button :disabled="viewIdx<=0" @click="goto(viewIdx-1)">上一张</el-button>
-      <el-button :disabled="viewIdx>=viewList.length-1" @click="goto(viewIdx+1)">下一张</el-button>
-      <el-tag v-if="dirty" type="warning">未保存</el-tag>
-      <el-button type="primary" :loading="saving" @click="save()">{{ dirty ? '保存*' : '保存' }}</el-button>
-      <el-button type="danger" plain @click="clearBoxes">清空本图</el-button>
+      <div class="tb-group">
+        <div class="tb-label">数据集</div>
+        <div class="tb-row">
+          <el-select v-model="datasetId" placeholder="选要标的那一批图" style="width:240px" @change="onDatasetChange">
+            <el-option v-for="d in datasets" :key="d.id" :label="`${d.name}（${d.classNames.join(', ')}）`" :value="d.id" />
+          </el-select>
+          <el-tag v-if="stats.total">共 {{ stats.total }} 张</el-tag>
+          <el-tag v-if="stats.annotated" type="success">已标 {{ stats.annotated }}</el-tag>
+        </div>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">筛选</div>
+        <el-select v-model="filterCls" placeholder="看哪些图" style="width:150px" @change="onFilter">
+          <el-option label="全部图片" value="all" />
+          <el-option label="未标注" value="unlabeled" />
+          <el-option v-for="(c, i) in classNames" :key="c" :label="`含 ${c}`" :value="String(i)" />
+        </el-select>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">标签</div>
+        <div class="tb-row">
+          <el-select v-model="clsId" placeholder="接下来画哪一类" style="width:150px">
+            <el-option v-for="(c, i) in classNames" :key="c" :label="c" :value="i">
+              <span class="cls-dot" :style="{ background: classColors[i] || '#909399' }" />
+              {{ c }}
+            </el-option>
+          </el-select>
+          <el-color-picker
+            v-if="classNames.length"
+            :model-value="classColors[clsId]"
+            title="改这个标签的框颜色"
+            @change="onColorChange"
+          />
+        </div>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">操作</div>
+        <el-radio-group v-model="mode" size="small">
+          <el-radio-button value="draw" title="按住左键拖出矩形框">画框</el-radio-button>
+          <el-radio-button value="pan" title="按住左键拖动查看大图">拖动图片</el-radio-button>
+          <el-radio-button value="sam" title="在目标上点一下，自动生成框">SAM 点选</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">缩放</div>
+        <el-button-group>
+          <el-button size="small" title="缩小" @click="nudgeZoom(1 / 1.25)">缩小</el-button>
+          <el-button size="small" title="点一下适配窗口" @click="zoomFit">{{ zoomLabel }}</el-button>
+          <el-button size="small" title="放大" @click="nudgeZoom(1.25)">放大</el-button>
+        </el-button-group>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">预标模型</div>
+        <div class="tb-row">
+          <el-select v-model="preModelId" placeholder="用哪个模型先画一版" clearable style="width:180px">
+            <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
+          </el-select>
+          <el-button
+            :disabled="!preModelId || !current"
+            :loading="preLoading"
+            title="用模型给当前这张图自动画框，画完可再改"
+            @click="prelabel(false)"
+          >预标本图</el-button>
+          <el-button
+            :disabled="!preModelId"
+            :loading="preAllLoading"
+            title="给当前筛选出的全部图片自动画框，可能较慢"
+            @click="prelabel(true)"
+          >预标全部</el-button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">编辑</div>
+        <div class="tb-row">
+          <el-button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</el-button>
+          <el-button :disabled="!canRedo" title="Ctrl+Y" @click="redo">重做</el-button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">翻页</div>
+        <div class="tb-row">
+          <el-button :disabled="viewIdx<=0" title="左方向键" @click="goto(viewIdx-1)">上一张</el-button>
+          <el-button :disabled="viewIdx>=viewList.length-1" title="右方向键" @click="goto(viewIdx+1)">下一张</el-button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">保存</div>
+        <div class="tb-row">
+          <el-tag v-if="dirty" type="warning">未保存</el-tag>
+          <el-button type="primary" :loading="saving" title="Ctrl+S" @click="save()">{{ dirty ? '保存*' : '保存' }}</el-button>
+          <el-button type="danger" plain title="删掉本图上所有框" @click="clearBoxes">清空本图</el-button>
+        </div>
+      </div>
     </div>
-    <el-empty v-if="!datasetId" description="请选择数据集。没有标注就无法训练。" />
-    <el-empty v-else-if="!samples.length" description="暂无图片，请先上传或抽帧" />
-    <el-empty v-else-if="!viewList.length" description="当前筛选没有图片" />
+    <p class="howto">用法：选数据集 → 选标签 → 点「画框」在图上拖出矩形 → 保存。不会画可先选预标模型，再点「预标本图」。</p>
+    <el-empty v-if="!datasetId" description="请先在上方选择「数据集」。没有框就无法训练检测模型。" />
+    <el-empty v-else-if="!samples.length" description="这个数据集还没有图片，请先去「数据集」页上传或视频抽帧。" />
+    <el-empty v-else-if="!viewList.length" description="当前筛选没有图片，可把「筛选」改回「全部图片」。" />
     <div v-else class="main">
       <div class="list">
+        <div class="list-hd">图片列表</div>
         <div
           v-for="(s, i) in viewList"
           :key="s.stem"
@@ -150,9 +209,9 @@ const canRedo = computed(() => histIdx.value >= 0 && histIdx.value < history.val
 const viewScale = computed(() => fitScale.value * zoom.value)
 const zoomLabel = computed(() => `${Math.round(viewScale.value * 100)}%`)
 const hintText = computed(() => {
-  if (mode.value === 'pan') return '按住左键拖动图片 · 滚轮缩放 · 点「画框」继续标注'
-  if (mode.value === 'sam') return '点击目标，MobileSAM 生成框 · 右键/中键/空格拖动图片 · 滚轮缩放'
-  return '左键画框 · 右键或中键拖动图片 · 空格+拖动也可平移 · 滚轮缩放 · 单击选中 · 拖角点调大小'
+  if (mode.value === 'pan') return '按住左键拖动查看大图 · 滚轮缩放 · 画完后点「画框」继续'
+  if (mode.value === 'sam') return '在目标上点一下，自动生成框（需稍等）· 不满意可撤销再点 · 滚轮缩放'
+  return '按住左键拖出矩形框 · 框错了点撤销 · 单击选中，拖角点调大小 · 滚轮缩放 · 右键拖动图片'
 })
 
 let dragBound = false
@@ -855,8 +914,11 @@ watch(mode, () => {
 
 <style scoped>
 .ann { height: calc(100vh - 120px); display: flex; flex-direction: column; }
+.toolbar { margin-bottom: 6px; }
+.howto { margin: 0 0 8px; flex-shrink: 0; }
 .main { flex: 1; display: flex; min-height: 0; gap: 12px; }
 .list { width: 220px; overflow: auto; background: #fff; border: 1px solid #ebeef5; }
+.list-hd { padding: 8px 10px; font-size: 12px; color: #909399; border-bottom: 1px solid #ebeef5; position: sticky; top: 0; background: #fff; z-index: 1; }
 .item { padding: 8px 10px; cursor: pointer; display: flex; justify-content: space-between; font-size: 12px; }
 .item.active { background: #ecf5ff; }
 .item.done { color: #67c23a; }

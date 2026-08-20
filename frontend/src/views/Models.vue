@@ -1,16 +1,30 @@
 <template>
   <div>
     <div class="toolbar">
-      <el-input v-model="name" placeholder="模型名称" clearable style="width:200px" @keyup.enter="load" />
-      <el-button type="primary" @click="openEdit()">新增模型</el-button>
-      <el-select v-model="builtinWeights" placeholder="内置 YOLO" style="width: 240px" filterable>
-        <el-option-group v-for="g in builtinGroups" :key="g.family" :label="g.family">
-          <el-option v-for="b in g.items" :key="b.value" :label="b.hint ? `${b.label}（${b.hint}）` : b.label" :value="b.value" />
-        </el-option-group>
-      </el-select>
-      <el-button type="success" plain :loading="regLoading" :disabled="!builtinWeights" @click="registerYolo">下载并登记</el-button>
-      <el-button @click="load">刷新</el-button>
+      <div class="tb-group">
+        <div class="tb-label">搜索</div>
+        <el-input v-model="name" placeholder="按名称筛选" clearable style="width:200px" @keyup.enter="load" />
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">内置 YOLO</div>
+        <div class="tb-row">
+          <el-select v-model="builtinWeights" placeholder="选一个现成权重" style="width: 240px" filterable>
+            <el-option-group v-for="g in builtinGroups" :key="g.family" :label="g.family">
+              <el-option v-for="b in g.items" :key="b.value" :label="b.hint ? `${b.label}（${b.hint}）` : b.label" :value="b.value" />
+            </el-option-group>
+          </el-select>
+          <el-button type="success" plain :loading="regLoading" :disabled="!builtinWeights" title="下载权重并出现在下面列表里" @click="registerYolo">下载并登记</el-button>
+        </div>
+      </div>
+      <div class="tb-group">
+        <div class="tb-label">其他</div>
+        <div class="tb-row">
+          <el-button type="primary" @click="openEdit()">新增模型</el-button>
+          <el-button @click="load">刷新</el-button>
+        </div>
+      </div>
     </div>
+    <p class="howto">用法：选一个内置 YOLO 点「下载并登记」，下完才能用来检测、预标或当训练基座。名字里的 n/s/m/l/x 越大越准，也越慢、越占内存。</p>
     <el-alert v-if="dlHint" class="page-card" :type="dlStatus === 'failed' ? 'error' : 'info'" :closable="false" :title="dlHint" />
     <el-progress
       v-if="dlJobId"
