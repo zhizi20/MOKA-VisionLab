@@ -30,13 +30,15 @@
 | 后端 API（不是页面） | http://127.0.0.1:8000 |
 | 健康检查 | http://127.0.0.1:8000/api/health |
 
-默认账号 `admin` / `admin123`。局域网同一网段可用本机 IP 的 `5174` 端口。只开后端、不经过前端时，浏览器访问 `http://127.0.0.1:8000/` 会看到说明页。
+默认账号 `admin` / `admin123`。同一 WiFi 的同事打开本机 IP 的 `5174` 端口（Windows 先以管理员运行一次 `open-lan.ps1` 放行防火墙）。只开后端、不经过前端时，浏览器访问 `http://127.0.0.1:8000/` 会看到说明页。
 
 ### Windows
 
 双击仓库根目录的 `start.bat`。不要用 `powershell -File start.ps1` 作为首选（旧脚本会因编码解析失败）。
 
 会弹出「后端」「前端」两个黑窗口，并打开浏览器。关掉那两个窗口即停止服务。
+
+同一 WiFi 给同事用：本机保持这两个窗口开着，同事浏览器打开 `http://本机WiFi的IP:5174/login`（当前一般是 `http://192.168.31.147:5174/login`），账号 `admin` / `admin123`。第一次需要管理员运行一次仓库根目录的 `open-lan.ps1`，放行 5174 和 8000 端口。
 
 首次需要环境时：
 
@@ -101,7 +103,7 @@ npm run dev
 TORCH_INDEX=https://download.pytorch.org/whl/cu124 bash backend/scripts/setup_venv.sh
 ```
 
-训练页选 **GPU 0**。机器够用可在 `backend/.env` 写 `DETECTLAB_CPU_SAFE=0` 后重启后端，解除 CPU 的 batch 限制。
+训练页选 **GPU 0**。若训练把电脑卡死，可在 `backend/.env` 写 `DETECTLAB_CPU_SAFE=1` 后重启后端，把 CPU 的 batch 限制回 4。
 
 ## 推荐流程
 
@@ -109,7 +111,7 @@ TORCH_INDEX=https://download.pytorch.org/whl/cu124 bash backend/scripts/setup_ve
 2. 数据集 → 新建类别 → 上传图片或视频抽帧
 3. 标注 → 画框 / 预标 / SAM 点选 → 保存
 4. 数据集 → 构建（至少 2 张已标注图）。要把数据给别人：点「导出」下载 ZIP，对方用「导入 ZIP」。
-5. 训练任务 → 创建并启动。本机 CPU 默认保护：batch≤4、imgsz≤640。更好的机器在 `backend/.env` 写 `DETECTLAB_CPU_SAFE=0` 后重启后端即可放松限制。
+5. 训练任务 → 创建并启动。每批张数可自己调（上限 128）。内存不够时在 `backend/.env` 写 `DETECTLAB_CPU_SAFE=1` 后重启后端，会把 CPU 的 batch 限制回 4。
 6. 用产出的 `best.pt` 做图片/视频检测
 
 SQLite 文件在 `backend/app.db`。本地文件在 `backend/uploads/`，按名称分目录：

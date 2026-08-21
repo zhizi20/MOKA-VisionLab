@@ -9,7 +9,7 @@
         </div>
       </div>
     </div>
-    <p class="howto">流程：选已「构建」的数据集 → 选基座模型 → 创建任务 → 点「启动」。本机只用 CPU 时请用较小的每批张数，避免卡死。</p>
+    <p class="howto">流程：选已「构建」的数据集 → 选基座模型 → 创建任务 → 点「启动」。每批张数越大越快、也越吃内存；有显卡请选 GPU 0。</p>
     <el-table :data="rows" v-loading="loading" border stripe>
       <el-table-column prop="jobName" label="任务" min-width="140" />
       <el-table-column prop="datasetName" label="数据集" min-width="120" />
@@ -161,8 +161,8 @@ const history = ref([])
 const plotImages = ref([])
 const previewVisible = ref(false)
 const previewIndex = ref(0)
-const form = reactive({ jobName: '', datasetId: null, baseModel: 'yolo26n.pt', epochs: 20, batch: 2, imgsz: 640, device: 'cpu' })
-const limits = reactive({ cpuSafe: true, cpuMaxBatch: 4, cpuMaxImgsz: 640, gpuMaxBatch: 32, gpuMaxImgsz: 1280, maxEpochs: 300 })
+const form = reactive({ jobName: '', datasetId: null, baseModel: 'yolo26n.pt', epochs: 20, batch: 8, imgsz: 640, device: 'cpu' })
+const limits = reactive({ cpuSafe: false, cpuMaxBatch: 128, cpuMaxImgsz: 1280, gpuMaxBatch: 128, gpuMaxImgsz: 1280, maxEpochs: 300 })
 const readyDs = computed(() => datasets.value.filter((d) => d.status === 'ready'))
 const batchMax = computed(() => (form.device === 'cpu' ? limits.cpuMaxBatch : limits.gpuMaxBatch))
 const imgMax = computed(() => (form.device === 'cpu' ? limits.cpuMaxImgsz : limits.gpuMaxImgsz))
@@ -266,7 +266,7 @@ async function load(opts = {}) {
 
 watch(() => form.device, (d) => {
   if (d === 'cpu') {
-    if (form.batch > limits.cpuMaxBatch) form.batch = Math.min(2, limits.cpuMaxBatch)
+    if (form.batch > limits.cpuMaxBatch) form.batch = limits.cpuMaxBatch
     if (form.imgsz > limits.cpuMaxImgsz) form.imgsz = limits.cpuMaxImgsz
   }
 })
@@ -275,7 +275,7 @@ function open() {
   form.jobName = 'detect-v1'
   form.datasetId = readyDs.value[0]?.id || null
   form.epochs = 20
-  form.batch = form.device === 'cpu' ? Math.min(2, limits.cpuMaxBatch) : 8
+  form.batch = 8
   form.imgsz = 640
   dlg.value = true
 }
@@ -293,7 +293,7 @@ async function save() {
 
 async function start(row) {
   const res = await jobApi.start(row.id)
-  ElMessage.success(res.message || '已启动。CPU 请保持 batch≤4，电脑才会还能用。')
+  ElMessage.success(res.message || '已启动')
   load()
 }
 

@@ -52,8 +52,8 @@ class Config:
     VIDEO_ALLOWED_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
     IMAGE_ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-    # 本机测试默认开启 CPU 保护。更好的机器可在 backend/.env 设 DETECTLAB_CPU_SAFE=0。
-    CPU_SAFE = _env_flag("DETECTLAB_CPU_SAFE", True)
+    # 默认不限制 CPU batch。内存紧张时在 backend/.env 设 DETECTLAB_CPU_SAFE=1。
+    CPU_SAFE = _env_flag("DETECTLAB_CPU_SAFE", False)
     CPU_MAX_BATCH = _env_int("DETECTLAB_CPU_MAX_BATCH", 4)
     CPU_MAX_IMGSZ = _env_int("DETECTLAB_CPU_MAX_IMGSZ", 640)
     CPU_TORCH_THREADS = _env_int("DETECTLAB_CPU_THREADS", 4)

@@ -21,6 +21,8 @@ from yolo_catalog import BUILTIN_YOLO, builtin_label
 jobs_bp = Blueprint("jobs", __name__, url_prefix="/api/jobs")
 
 _train_lock = threading.Lock()
+_MAX_BATCH = 128
+_MAX_IMGSZ = 1280
 
 
 def _is_cpu(device: str) -> bool:
@@ -30,14 +32,14 @@ def _is_cpu(device: str) -> bool:
 def _cpu_caps() -> tuple[int, int]:
     if Config.CPU_SAFE:
         return Config.CPU_MAX_BATCH, Config.CPU_MAX_IMGSZ
-    return 32, 1280
+    return _MAX_BATCH, _MAX_IMGSZ
 
 
 def _clamp_job_params(job: TrainJob) -> list[str]:
     notes: list[str] = []
     job.epochs = max(1, min(int(job.epochs or 20), 300))
-    job.batch = max(1, min(int(job.batch or 4), 32))
-    job.imgsz = max(320, min(int(job.imgsz or 640), 1280))
+    job.batch = max(1, min(int(job.batch or 4), _MAX_BATCH))
+    job.imgsz = max(320, min(int(job.imgsz or 640), _MAX_IMGSZ))
     if not _is_cpu(job.device):
         return notes
     job.device = "cpu"
@@ -88,7 +90,7 @@ def mark_interrupted_jobs() -> None:
         return
     for job in stuck:
         job.status = "failed"
-        job.error = "服务重启，训练中断。CPU 训练请用 batch 2～4，否则容易卡死整台电脑。"
+        job.error = "服务重启，训练中断。"
     db.session.commit()
 
 
@@ -356,8 +358,8 @@ def train_limits():
         "cpuSafe": Config.CPU_SAFE,
         "cpuMaxBatch": max_batch,
         "cpuMaxImgsz": max_imgsz,
-        "gpuMaxBatch": 32,
-        "gpuMaxImgsz": 1280,
+        "gpuMaxBatch": _MAX_BATCH,
+        "gpuMaxImgsz": _MAX_IMGSZ,
         "maxEpochs": 300,
     })
 

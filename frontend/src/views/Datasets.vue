@@ -21,7 +21,7 @@
         <el-button @click="load">刷新</el-button>
       </div>
     </div>
-    <p class="howto">流程：新建或导入 → 上传图片（或视频抽帧）→ 去「数据标注」画框 → 回来点「构建」划分训练/验证 → 再去「训练任务」。要把数据给别人：点「导出」下载 ZIP，对方点「导入 ZIP」。</p>
+    <p class="howto">流程：新建或导入 → 上传图片（或视频抽帧）→ 去「数据标注」画框 → 回来点「构建」划分训练/验证 → 再去「训练任务」。要把数据给别人：点「导出」，选已标注或未标注 raw（不会把构建后的划分再打一份），对方点「导入 ZIP」。</p>
     <el-alert
       v-if="importHint"
       class="page-card"
@@ -34,6 +34,19 @@
       class="page-card"
       :percentage="importPct"
       :status="importStatus === 'failed' ? 'exception' : (importStatus === 'done' && !importFailures.length) ? 'success' : undefined"
+    />
+    <el-alert
+      v-if="exportHint"
+      class="page-card"
+      :type="exportStatus === 'failed' ? 'error' : exportStatus === 'done' ? 'success' : 'info'"
+      :closable="false"
+      :title="exportHint"
+    />
+    <el-progress
+      v-if="exportJobId || (exportHint && exportStatus !== 'done')"
+      class="page-card"
+      :percentage="exportPct"
+      :status="exportStatus === 'failed' ? 'exception' : exportStatus === 'done' ? 'success' : undefined"
     />
     <el-table v-if="importFailures.length" :data="importFailures" size="small" border class="page-card" max-height="240">
       <el-table-column prop="file" label="失败图片" min-width="220" />
@@ -74,6 +87,12 @@
             :stroke-width="6"
             style="margin-top:6px"
           />
+          <el-progress
+            v-else-if="row.exportJob"
+            :percentage="row.exportJob.progress || 0"
+            :stroke-width="6"
+            style="margin-top:6px"
+          />
         </template>
       </el-table-column>
       <el-table-column label="操作" min-width="640" fixed="right">
@@ -90,7 +109,7 @@
             <el-button size="small" type="primary" plain title="预览图片和磁盘路径" @click="browse(row)">打开</el-button>
             <el-button size="small" type="warning" title="给图片画检测框" @click="$router.push({ path: '/annotate', query: { id: row.id } })">标注</el-button>
             <el-button size="small" type="success" :disabled="row.status==='importing'" :loading="row._building" title="按训练比例划分 train/val，训练前必须点一次" @click="build(row)">构建</el-button>
-            <el-button size="small" :loading="row._exporting" title="打包图片和标注，发给别人下载" @click="exportZip(row)">导出</el-button>
+            <el-button size="small" :loading="row._exporting" :disabled="!!row.exportJob && row.exportJob.status === 'running'" title="选择已标注或未标注 raw 打包发给别人" @click="openExport(row)">导出</el-button>
             <el-button size="small" v-if="row.importJob && !row.importJob.paused" @click="pause(row)">暂停</el-button>
             <el-button size="small" type="primary" v-if="row.importJob?.paused" @click="resume(row)">继续</el-button>
             <el-button
@@ -142,11 +161,24 @@
       </div>
       <div v-if="browseTotal > browseThumbs.length" class="hint">预览前 {{ browseThumbs.length }} 张，共 {{ browseTotal }} 张。完整检查请打开目录或进入标注。</div>
     </el-dialog>
+
+    <el-dialog v-model="exportDlg" title="导出数据集" width="520px">
+      <p class="export-hint">只从 raw 取材，不会再带「构建」后的 train/val，避免同一张图打两份。对方导入后若要训练，再点「构建」即可。</p>
+      <el-radio-group v-model="exportMode" class="export-modes">
+        <el-radio value="labeled" :disabled="!exportLabeledCount">已标注 {{ exportLabeledCount }} 张（图片 + 框）</el-radio>
+        <el-radio value="unlabeled" :disabled="!exportUnlabeledCount">未标注 raw {{ exportUnlabeledCount }} 张（只有图）</el-radio>
+        <el-radio value="all" :disabled="!exportAllCount">全部 raw {{ exportAllCount }} 张（不含划分副本）</el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button @click="exportDlg = false">取消</el-button>
+        <el-button type="primary" :disabled="!exportModeCount" @click="confirmExport">开始导出</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { datasetApi } from '../api'
@@ -164,6 +196,21 @@ const importPct = ref(0)
 const importStatus = ref('')
 const importHint = ref('')
 const importFailures = ref([])
+const exportJobId = ref('')
+const exportPct = ref(0)
+const exportStatus = ref('')
+const exportHint = ref('')
+const exportDlg = ref(false)
+const exportRow = ref(null)
+const exportMode = ref('labeled')
+const exportLabeledCount = computed(() => exportRow.value?.labeledCount || 0)
+const exportAllCount = computed(() => exportRow.value?.imageCount || 0)
+const exportUnlabeledCount = computed(() => Math.max(0, exportAllCount.value - exportLabeledCount.value))
+const exportModeCount = computed(() => {
+  if (exportMode.value === 'labeled') return exportLabeledCount.value
+  if (exportMode.value === 'unlabeled') return exportUnlabeledCount.value
+  return exportAllCount.value
+})
 const form = reactive({ id: null, name: '', classNames: [], splitRatio: 0.8, description: '' })
 const browseDlg = ref(false)
 const browseRow = ref(null)
@@ -178,6 +225,8 @@ let listTimer = null
 function statusText(row) {
   if (row.importJob?.paused) return '已暂停'
   if (row.importJob || row.status === 'importing') return '下载中'
+  if (row.exportJob?.status === 'running') return '打包中'
+  if (row.exportJob?.status === 'ready') return '待下载'
   if (row.status === 'incomplete') return `缺 ${row.failedCount} 张`
   if (row.status === 'ready') return '已构建'
   if (row.status === 'raw') return '未构建'
@@ -187,13 +236,25 @@ function statusText(row) {
 function statusType(row) {
   if (row.importJob?.paused) return 'info'
   if (row.importJob || row.status === 'importing') return 'warning'
+  if (row.exportJob) return 'warning'
   if (row.status === 'incomplete') return 'danger'
   if (row.status === 'ready') return 'success'
   return 'info'
 }
 
 function anyActive(list = rows.value) {
-  return list.some((r) => r.importJob || r.status === 'importing')
+  return list.some((r) => r.importJob || r.status === 'importing' || r.exportJob)
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function startListPoll() {
@@ -221,24 +282,88 @@ async function onZip(f) {
   }
 }
 
-async function exportZip(row) {
+function openExport(row) {
+  exportRow.value = row
+  if ((row.labeledCount || 0) > 0) exportMode.value = 'labeled'
+  else if ((row.imageCount || 0) > (row.labeledCount || 0)) exportMode.value = 'unlabeled'
+  else exportMode.value = 'all'
+  exportDlg.value = true
+}
+
+function confirmExport() {
+  const row = exportRow.value
+  if (!row || !exportModeCount.value) return
+  exportDlg.value = false
+  exportZip(row, exportMode.value)
+}
+
+async function exportZip(row, mode = 'labeled') {
+  const modeText = mode === 'labeled' ? '已标注' : mode === 'unlabeled' ? '未标注' : '全部 raw'
   row._exporting = true
+  exportJobId.value = ''
+  exportPct.value = 0
+  exportStatus.value = 'running'
+  exportHint.value = `正在打包「${row.name}」的${modeText}…`
   try {
-    const blob = await datasetApi.exportZip(row.id)
+    const start = await datasetApi.startExport(row.id, { mode })
+    const jobId = start.data.jobId
+    exportJobId.value = jobId
+    startListPoll()
+    const packed = await waitExportReady(jobId)
+    const filename = packed.filename || `${row.name || 'dataset'}.zip`
+    exportStatus.value = 'downloading'
+    exportHint.value = `打包完成，正在下载「${filename}」`
+    exportPct.value = 0
+    const blob = await datasetApi.exportFile(jobId, (evt) => {
+      if (!evt.total) return
+      exportPct.value = Math.round((evt.loaded / evt.total) * 100)
+      exportHint.value = `正在下载「${filename}」 ${fmtBytes(evt.loaded)} / ${fmtBytes(evt.total)}`
+    })
     if (blob.type && blob.type.includes('json')) {
       const body = JSON.parse(await blob.text())
+      exportStatus.value = 'failed'
+      exportHint.value = body.message || '导出失败'
       ElMessage.error(body.message || '导出失败')
       return
     }
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${row.name || 'dataset'}.zip`
+    a.download = filename
     a.click()
     URL.revokeObjectURL(url)
+    exportPct.value = 100
+    exportStatus.value = 'done'
+    exportHint.value = `「${row.name}」的${modeText}已导出，发给别人即可`
     ElMessage.success('已开始下载数据包，发给别人即可')
+    load()
+  } catch (err) {
+    exportStatus.value = 'failed'
+    exportHint.value = err?.message || '导出失败'
   } finally {
     row._exporting = false
+  }
+}
+
+async function waitExportReady(jobId) {
+  for (;;) {
+    const res = await datasetApi.exportProgress(jobId)
+    const data = res.data || {}
+    exportPct.value = data.progress || 0
+    exportStatus.value = data.status || 'running'
+    const total = data.total || 0
+    const processed = data.processed || 0
+    if (data.status === 'failed') {
+      throw new Error(data.error || '打包失败')
+    }
+    if (data.status === 'ready' || data.status === 'done') {
+      exportPct.value = 100
+      return data
+    }
+    exportHint.value = total
+      ? `正在打包 ${processed} / ${total} 个文件`
+      : '正在统计文件…'
+    await sleep(400)
   }
 }
 
@@ -464,6 +589,8 @@ onUnmounted(() => {
 .ops-inline { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 4px; }
 .ops :deep(.el-upload) { display: inline-flex; }
 .browse-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.export-hint { margin: 0 0 14px; color: #606266; font-size: 13px; line-height: 1.55; }
+.export-modes { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
 .thumb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; max-height: 520px; overflow: auto; }
 .thumb { background: #f5f7fa; border: 1px solid #ebeef5; border-radius: 6px; padding: 6px; cursor: pointer; }
 .thumb img { width: 100%; height: 100px; object-fit: cover; border-radius: 4px; display: block; }

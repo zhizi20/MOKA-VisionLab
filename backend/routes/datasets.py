@@ -37,7 +37,20 @@ from ndjson_import import (
 from routes.models import resolve_weight
 from security import login_required
 from smart_label import sam_click_box, yolo_prelabel
-from dataset_pack import extract_zip, read_manifest, write_dataset_zip
+from dataset_pack import (
+    bind_export_job,
+    empty_export_message,
+    export_suffix,
+    extract_zip,
+    export_jobs,
+    export_jobs_lock,
+    normalize_mode,
+    pack_image_count,
+    pack_items,
+    read_manifest,
+    snapshot_export,
+    write_dataset_zip,
+)
 from storage import assign_dataset_folder, dataset_dir, rewrite_data_yaml, slugify
 from utils import fail, ok
 
@@ -122,6 +135,7 @@ def _to_dict(ds: Dataset) -> dict:
         "failures": failed[:50],
         "folderPath": str(_raw_images(ds)),
         "importJob": snapshot_job(ds.id),
+        "exportJob": snapshot_export(ds.id),
         "createTime": ds.create_time.strftime("%Y-%m-%d %H:%M:%S") if ds.create_time else "",
     }
 
@@ -445,31 +459,154 @@ def retry_import(did: int):
     )
 
 
+def _export_mode() -> str:
+    data = request.get_json(silent=True) or {}
+    return normalize_mode(data.get("mode") or request.args.get("mode") or request.form.get("mode"))
+
+
+def _export_meta(ds: Dataset, mode: str) -> dict:
+    return {
+        "name": ds.name,
+        "classNames": _classes(ds),
+        "splitRatio": ds.split_ratio,
+        "description": ds.description or "",
+        "status": ds.status,
+        "trainCount": ds.train_count,
+        "valCount": ds.val_count,
+        "exportMode": mode,
+    }
+
+
+def _export_filename(ds: Dataset, mode: str) -> str:
+    return f"{slugify(ds.name, 'dataset')}-{export_suffix(mode)}.zip"
+
+
+def _run_export(job_id: str, ds_dir: Path, zip_path: Path, meta: dict, mode: str):
+    def on_progress(done: int, total: int):
+        with export_jobs_lock:
+            job = export_jobs.get(job_id)
+            if not job:
+                return
+            job["processed"] = done
+            job["total"] = total
+            job["progress"] = int(done * 100 / total) if total else 0
+
+    try:
+        write_dataset_zip(ds_dir, zip_path, meta, on_progress=on_progress, mode=mode)
+        size = zip_path.stat().st_size if zip_path.is_file() else 0
+        with export_jobs_lock:
+            job = export_jobs.get(job_id)
+            if job:
+                job.update(status="ready", stage="ready", progress=100, bytes=size)
+    except Exception as exc:  # noqa: BLE001
+        with export_jobs_lock:
+            job = export_jobs.get(job_id)
+            if job:
+                job.update(status="failed", stage="failed", error=str(exc))
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+@datasets_bp.post("/<int:did>/export")
+@login_required
+def start_export(did: int):
+    ds = db.session.get(Dataset, did)
+    if ds is None:
+        return fail("数据集不存在", 404)
+    mode = _export_mode()
+    items = pack_items(_ds_dir(ds), mode)
+    n = pack_image_count(items)
+    if n == 0:
+        return fail(empty_export_message(mode))
+    running = snapshot_export(did)
+    if running and running.get("status") == "running":
+        return ok(running, "已在打包，请稍候")
+    job_id = uuid.uuid4().hex
+    Config.TMP_FOLDER.mkdir(parents=True, exist_ok=True)
+    zip_path = Config.TMP_FOLDER / f"export_{ds.id}_{job_id}.zip"
+    filename = _export_filename(ds, mode)
+    with export_jobs_lock:
+        export_jobs[job_id] = {
+            "status": "running",
+            "stage": "packing",
+            "datasetId": ds.id,
+            "name": ds.name,
+            "mode": mode,
+            "progress": 0,
+            "processed": 0,
+            "total": n,
+            "bytes": 0,
+            "zipPath": str(zip_path),
+            "filename": filename,
+            "error": None,
+        }
+    bind_export_job(ds.id, job_id)
+    threading.Thread(
+        target=_run_export,
+        args=(job_id, _ds_dir(ds), zip_path, _export_meta(ds, mode), mode),
+        daemon=True,
+    ).start()
+    return ok({"jobId": job_id, "datasetId": ds.id, "filename": filename, "mode": mode, "total": n}, "已开始打包")
+
+
+@datasets_bp.get("/export-progress/<job_id>")
+@login_required
+def export_progress(job_id: str):
+    with export_jobs_lock:
+        job = export_jobs.get(job_id)
+        if job is None:
+            return fail("导出任务不存在", 404)
+        public = {k: v for k, v in job.items() if k != "zipPath"}
+    return ok(public)
+
+
+@datasets_bp.get("/export-file/<job_id>")
+@login_required
+def export_file(job_id: str):
+    with export_jobs_lock:
+        job = export_jobs.get(job_id)
+        if job is None:
+            return fail("导出任务不存在", 404)
+        if job.get("status") == "failed":
+            return fail(job.get("error") or "导出失败")
+        if job.get("status") != "ready":
+            return fail("还在打包，请稍候")
+        zip_path = Path(job["zipPath"])
+        filename = job.get("filename") or "dataset.zip"
+
+    if not zip_path.is_file():
+        return fail("导出文件已失效，请重新导出", 404)
+
+    @after_this_request
+    def _cleanup(response):
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        with export_jobs_lock:
+            current = export_jobs.get(job_id)
+            if current:
+                current.update(status="done", stage="done")
+        return response
+
+    return send_file(zip_path, as_attachment=True, download_name=filename, mimetype="application/zip")
+
+
 @datasets_bp.get("/<int:did>/export")
 @login_required
 def export_dataset(did: int):
     ds = db.session.get(Dataset, did)
     if ds is None:
         return fail("数据集不存在", 404)
-    img_dir = _raw_images(ds)
-    if not img_dir.exists() or not any(img_dir.iterdir()):
-        return fail("这个数据集还没有图片，先上传或标注再导出")
-    names = _classes(ds)
+    mode = _export_mode()
+    items = pack_items(_ds_dir(ds), mode)
+    if pack_image_count(items) == 0:
+        return fail(empty_export_message(mode))
     Config.TMP_FOLDER.mkdir(parents=True, exist_ok=True)
     zip_path = Config.TMP_FOLDER / f"export_{ds.id}_{uuid.uuid4().hex}.zip"
-    write_dataset_zip(
-        _ds_dir(ds),
-        zip_path,
-        {
-            "name": ds.name,
-            "classNames": names,
-            "splitRatio": ds.split_ratio,
-            "description": ds.description or "",
-            "status": ds.status,
-            "trainCount": ds.train_count,
-            "valCount": ds.val_count,
-        },
-    )
+    write_dataset_zip(_ds_dir(ds), zip_path, _export_meta(ds, mode), mode=mode)
 
     @after_this_request
     def _cleanup(response):
@@ -479,8 +616,12 @@ def export_dataset(did: int):
             pass
         return response
 
-    filename = f"{slugify(ds.name, 'dataset')}.zip"
-    return send_file(zip_path, as_attachment=True, download_name=filename, mimetype="application/zip")
+    return send_file(
+        zip_path,
+        as_attachment=True,
+        download_name=_export_filename(ds, mode),
+        mimetype="application/zip",
+    )
 
 
 @datasets_bp.post("/import-zip")
